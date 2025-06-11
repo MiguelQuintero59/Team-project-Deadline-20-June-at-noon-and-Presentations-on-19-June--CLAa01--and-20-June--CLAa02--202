@@ -1,0 +1,498 @@
+---
+title: "Group Project"
+output: pdf_document
+date: "2025-06-03"
+---
+
+
+
+# FUNCTIONS
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+load_gene_subset <- function(group_number,
+                             expression_file = "gene-expression-invasive-vs-noninvasive-cancer.csv",
+                             subset_file = "teamsubsets.csv",
+                             include_class = TRUE) {
+  library(dplyr)
+  library(caret)
+  library(glmnet)
+  library(ggplot2)
+  library(reshape2)
+  library(pheatmap)
+  library(MASS)
+
+  # Load main dataset
+  dataframe <- read.csv(file = expression_file)
+
+  # Load subset file
+  df_subsets <- read.csv(file = subset_file, sep = ' ')
+
+  # Filter by group number
+  reg_id <- df_subsets[group_number, ]
+
+  # Extract gene indices (remove the ID column)
+  subsets <- as.numeric(reg_id[-1])
+
+  # Filter gene expression dataframe using selected gene indices
+  df <- dataframe[, subsets]
+
+  # Optionally, add class and cancer type
+  if (include_class) {
+    df$Class <- dataframe$Class
+  }
+
+  return(df)
+}
+
+
+#Model Evaluation 
+
+# Initialize empty results data frame
+results_table <- data.frame(
+  Model = character(),
+  Hyperparameter = character(),
+  Precision = numeric(),
+  Sensitivity = numeric(),
+  Specificity = numeric(),
+  stringsAsFactors = FALSE
+)
+
+# Define the function
+add_results <- function(model, hyperparameter, precision, sensitivity, specificity) {
+  new_row <- data.frame(
+    Model = model,
+    Hyperparameter = hyperparameter,
+    Precision = precision,
+    Sensitivity = sensitivity,
+    Specificity = specificity,
+    stringsAsFactors = FALSE
+  )
+  
+  # Use global assignment to update results_table
+  assign("results_table", rbind(results_table, new_row), envir = .GlobalEnv)
+}
+```
+# Feature subset selection is the process of identifying and removing as much irrelevant and redundant information as possible. 
+
+# FEATURE SELECTION HIGH VARIANCE FEATURES + SHAPIRO WILK TEST + MODEL LDA
+```{r pressure, echo=FALSE}
+# Feature Selection - Filtering High Variance and use LASSO 1 to get the coefficients
+# Observation: There is not enough background to decide the threshold of 0.1 for the significance in the variance. There are 100 genes selected 
+
+#Load data
+df <- load_gene_subset(group_number = 7, include_class = TRUE)
+
+# Calculating the variance for all the attributes
+variance <- apply(df,2,var)
+variance_table <- data.frame(Gene = colnames(df), Variance = variance)
+
+#Filtering attributes with higher or equal variance than 0.1
+selected_genes <- variance_table$Gene[variance_table$Variance >= 0.1]
+
+#Selected Genes considering genes with variance
+df_selected <- df[, selected_genes]
+
+# Check Normal Distribution in predictor variables
+# Check Normality of Predictors using Shapiro Wilk Test
+# Shapiro Wilk Test: Is a statistical test used to assess wether a dataset follows a normal distribution. It doesn't work well with large sample size
+shapiro_pvals <- sapply(df_selected, function(x) {
+  if(length(unique(x)) < 3) return(NA)  # Not enough variation to test
+  shapiro.test(x)$p.value
+})
+
+# Remove NA p-values (genes with too few unique values)
+shapiro_pvals <- shapiro_pvals[!is.na(shapiro_pvals)]
+
+# Adjust p-values for multiple testing using Benjamini-Hochberg (FDR)
+p_adj <- p.adjust(shapiro_pvals, method = "BH")
+
+# Summary using the P-value 0.05 as threshold to reject or not the hypothesis
+cat("Number of genes tested:", length(shapiro_pvals), "\n")
+cat("Number of genes passing normality (adj p > 0.05):", sum(p_adj > 0.05), "\n")
+cat("Number of genes failing normality (adj p <= 0.05):", sum(p_adj <= 0.05), "\n")
+
+# Select genes that pass normality
+normal_genes <- names(p_adj[p_adj > 0.05])
+cat("In conclusion there are", length(normal_genes) ,"that achieve the assumption to have a normal distribution ")
+
+# Filter original df to keep only normal genes + Class
+df_filtered <- df_selected[, c(normal_genes, "Class")]
+
+# LDA Model 
+  df_filtered$Class <- as.factor(df_filtered$Class)
+# df_filtered$Class <- factor(df_filtered$Class, levels = c(1, 2), labels = c("Non-invasive", "Invasive"))
+
+# Run LDA using only selected features
+lda_model <- lda(Class ~ ., data = df_filtered)
+
+# Project data into LDA space for visualization
+lda_projection <- predict(lda_model)
+
+# View the model Summary 
+summary(lda_model)
+
+# Predict class for the same data
+predictions <- predict(lda_model, newdata = df)
+
+# Model Evaluation
+# class==1 ‘non-invasive cancer’  and class==2 ‘invasive cancer’ 
+cm <- confusionMatrix(as.factor(predictions$class), as.factor(df_filtered$Class), positive = "1")
+print(cm)
+
+
+# Access precision (called "Pos Pred Value") and specificity
+precision <- cm$byClass["Pos Pred Value"]
+sensitivity <- cm$byClass["Sensitivity"]
+specificity <- cm$byClass["Specificity"]
+
+
+add_results(
+  model = "LDA v1",
+  hyperparameter = "prior=0.5",
+  precision = precision,
+  sensitivity = sensitivity,
+  specificity = specificity
+)
+
+#Conclusion:
+# There is not enough arguments to determine the thresholds for the variance. Additionally, the results in the LDA feature reduction simplified the model to 2 features
+```
+
+# FEATURE SELECTION LDA + SHAPIRO WILK TEST + MODEL LDA (SIMILAR WITH MODEL #4)
+```{r pressure, echo=FALSE}
+# LDA Dimensionality Reduction and Model  -- VERSION 2
+# Conclusion: The approach using LDA for dimensionality reduction was: 
+# 1. Check normality distribution across all features to double check if achieve the assumption requirement, using Shapiro Wilk Test. 
+# 2. Remove NA p-values
+# 3. Adjust p-values because the multiple testing problem - using Benjamini-Hochberg Works reducing the False Discovery Rate (FDR), the expected proportion of false positive 
+# 4. Summary using the P-value 0.05 as threshold to reject or not the hypothesis
+
+# Dimensionality Reduction
+
+# Load Data
+df <- load_gene_subset(group_number = 7, include_class = TRUE)
+
+# Extract Predictors
+gene_data <- df[, setdiff(names(df), "Class")]
+
+# Check Normality of Predictors using Shapiro Wilk Test
+# Shapiro Wilk Test: Is a statistical test used to assess wether a dataset follows a normal distribution. It doesn't work well with large sample size
+shapiro_pvals <- sapply(gene_data, function(x) {
+  if(length(unique(x)) < 3) return(NA)  # Not enough variation to test
+  shapiro.test(x)$p.value
+})
+
+# Remove NA p-values (genes with too few unique values)
+shapiro_pvals <- shapiro_pvals[!is.na(shapiro_pvals)]
+
+# Adjust p-values for multiple testing using Benjamini-Hochberg (FDR)
+p_adj <- p.adjust(shapiro_pvals, method = "BH")
+
+# Summary using the P-value 0.05 as threshold to reject or not the hypothesis
+cat("Number of genes tested:", length(shapiro_pvals), "\n")
+cat("Number of genes passing normality (adj p > 0.05):", sum(p_adj > 0.05), "\n")
+cat("Number of genes failing normality (adj p <= 0.05):", sum(p_adj <= 0.05), "\n")
+
+# Select genes that pass normality
+normal_genes <- names(p_adj[p_adj > 0.05])
+cat("In conclusion there are", length(normal_genes) ,"that achieve the assumption to have a normal distribution ")
+
+
+# Filter original df to keep only normal genes + Class
+df_filtered <- df[, c(normal_genes, "Class")]
+
+# ---------------------------------------------------------------------------------------------------
+#Double check if it really matters to use this plots
+# Plot histogram of raw p-values
+# hist(shapiro_pvals, breaks = 50, main = "Histogram of Shapiro-Wilk p-values", xlab = "p-value")
+# Plot histogram of adjusted p-values
+# hist(p_adj, breaks = 50, main = "Histogram of Adjusted p-values (FDR)", xlab = "Adjusted p-value")
+# ---------------------------------------------------------------------------------------------------
+
+# Visualize QQ plots for a random sample of 20 genes that pass normality
+sample_genes <- sample(normal_genes, min(20, length(normal_genes)))
+
+par(mfrow = c(4, 5), mar = c(2, 2, 2, 1))
+
+for (g in sample_genes) {
+  qqnorm(gene_data[[g]], main = g, cex.main = 0.8)
+  qqline(gene_data[[g]], col = "red")
+}
+
+par(mfrow = c(1,1))  # Reset plotting layout
+
+# LDA Model 
+  df_filtered$Class <- as.factor(df_filtered$Class)
+# df_filtered$Class <- factor(df_filtered$Class, levels = c(1, 2), labels = c("Non-invasive", "Invasive"))
+
+# Run LDA using only selected features
+lda_model <- lda(Class ~ ., data = df_filtered)
+
+# Project data into LDA space for visualization
+lda_projection <- predict(lda_model)
+
+# View the model Summary 
+summary(lda_model)
+
+# Predict class for the same data
+predictions <- predict(lda_model, newdata = df)
+
+# Model Evaluation
+# class==1 ‘non-invasive cancer’  and class==2 ‘invasive cancer’ 
+cm <- confusionMatrix(as.factor(predictions$class), as.factor(df_filtered$Class), positive = "1")
+print(cm)
+
+
+# Access precision (called "Pos Pred Value") and specificity
+precision <- cm$byClass["Pos Pred Value"]
+sensitivity <- cm$byClass["Sensitivity"]
+specificity <- cm$byClass["Specificity"]
+
+
+add_results(
+  model = "LDA v2",
+  hyperparameter = "prior=0.5",
+  precision = precision,
+  sensitivity = sensitivity,
+  specificity = specificity
+)
+
+```
+
+# REGULARIZAITON TECHNIQUES (L1)
+# FEATURE SELECTION LASSO 1 + SHAPIRO WILK TEST + MODEL LDA 
+```{r pressure, echo=FALSE}
+# Lasso 1 - Filtering without low variance 
+# Observation: The alternative of use Lasso 1 as dimensionality reduction tool is possible due to the results of the weights. 24 variables are considered in the final results. 
+df <- load_gene_subset(group_number = 7, include_class = TRUE)
+X <- as.matrix(df[, !names(df) %in% "Class"]) # Predictors (genes)
+y <- as.factor(df$Class)          # Binary target (0/1)
+
+#Lasso Crossvalidated
+set.seed(123)  
+
+cv_lasso <- cv.glmnet(
+  X, y,
+  alpha = 1,                # Lasso (L1 penalty)
+  family = "binomial",      # Logistic regression
+  type.measure = "class"    # Use "deviance" for regression
+)
+
+# Best lambda (lowest classification error)
+best_lambda <- cv_lasso$lambda.min
+
+
+# Get the coefficients at the best lambda
+lasso_coefs <- coef(cv_lasso, s = "lambda.min")
+
+
+# Convert to a tidy data frame
+selected_genes_lasso <- as.data.frame(as.matrix(lasso_coefs))
+selected_genes_lasso$Gene <- rownames(selected_genes_lasso)
+colnames(selected_genes_lasso)[1] <- "Coefficient"
+
+
+# Filter non-zero coefficients (selected features)
+selected_genes_lasso <- selected_genes_lasso[selected_genes_lasso$Coefficient != 0, ]
+
+# Conclusion:
+# Using Lasso 1 to perform feature reduction with all the predictors variables finalized with 25 features. There is no variance filter method in this scenario.
+
+
+# LDA Model using Selected Genes from Lasso1
+# 1. Load entire dataframe 
+# 2. Filter genes selected by LASSO
+# 3. Check Normality of Predictors using Shapiro Wilk Test
+# 4. Remove NA p-values
+# 5. Adjust p-values because the multiple testing problem - using Benjamini-Hochberg Works reducing the False Discovery Rate (FDR), the expected proportion of false positive 
+# 6. Summary using the P-value 0.05 as threshold to reject or not the hypothesis
+# 7. Run LDA model 16 variables
+
+# Load full gene dataset
+df <- load_gene_subset(group_number = 7, include_class = TRUE)
+
+# Filter genes selected by LASSO
+selected_genes_lasso <- selected_genes_lasso[selected_genes_lasso$Coefficient != 0, ]
+length(selected_genes_lasso)
+
+# Safely match only genes that exist in df
+genes_in_df <- intersect(unlist(selected_genes_lasso$Gene), colnames(df))
+
+# Keep selected genes + Class column
+genes_to_keep <- c(genes_in_df, "Class")
+
+# Subset the dataframe
+df_filtered <- df[, genes_to_keep]
+
+# Check Normality
+shapiro_pvals <- sapply(df_filtered, function(x) {
+  if(length(unique(x)) < 3) return(NA)  # Not enough variation to test
+  shapiro.test(x)$p.value
+})
+
+# Remove NA p-values (genes with too few unique values)
+shapiro_pvals <- shapiro_pvals[!is.na(shapiro_pvals)]
+
+# Adjust p-values for multiple testing using Benjamini-Hochberg (FDR)
+p_adj <- p.adjust(shapiro_pvals, method = "BH")
+
+# Summary using the P-value 0.05 as threshold to reject or not the hypothesis
+cat("Number of genes tested:", length(shapiro_pvals), "\n")
+cat("Number of genes passing normality (adj p > 0.05):", sum(p_adj > 0.05), "\n")
+cat("Number of genes failing normality (adj p <= 0.05):", sum(p_adj <= 0.05), "\n")
+
+
+# Select genes that pass normality
+normal_genes <- names(p_adj[p_adj > 0.05])
+cat("In conclusion there are", length(normal_genes) ,"that achieve the assumption to have a normal distribution ")
+
+df_filtered <- df_filtered[, c(normal_genes, "Class")]
+
+# Run LDA using only selected features
+lda_model <- lda(Class ~ ., data = df_filtered)
+
+# Ranking the features
+weights <- abs(lda_model$scaling[, 1])
+feature_importance <- data.frame(
+  Gene = names(weights),
+  Weight = weights
+)
+selected_genes <- feature_importance[order(-feature_importance$Weight), ]
+
+
+
+# Project data into LDA space for visualization
+lda_projection <- predict(lda_model)
+
+
+# View the model Summary 
+summary(lda_model)
+
+# Predict class for the same data
+predictions <- predict(lda_model, newdata = df)
+
+# Model Evaluation
+# class==1 ‘non-invasive cancer’  and class==2 ‘invasive cancer’ 
+cm <- confusionMatrix(as.factor(predictions$class), as.factor(df_filtered$Class), positive = "1")
+print(cm)
+
+
+# Access precision (called "Pos Pred Value") and specificity
+precision <- cm$byClass["Pos Pred Value"]
+sensitivity <- cm$byClass["Sensitivity"]
+specificity <- cm$byClass["Specificity"]
+
+
+add_results(
+  model = "LDA v3",
+  hyperparameter = "prior=0.5",
+  precision = precision,
+  sensitivity = sensitivity,
+  specificity = specificity
+)
+
+```
+
+
+# FEATURE SELECTION CORRELATION + SHAPIRO WILK TEST + MODEL LDA (SIMILAR WITH MODEL #2)
+```{r pressure, echo=FALSE}
+# FEATURE SELECTION CORRELATION
+# 1. Load dataframe
+# 2. Compute correlation matrix
+# 3. 
+
+# Load dataframe
+df <- load_gene_subset(group_number = 7, include_class = FALSE)
+
+# Compute correlation matrix
+cor_matrix <- cor(df, method = "pearson", use = "pairwise.complete.obs")
+cor_df <- as.data.frame(as.table(cor_matrix))
+
+# Remove self-correlations
+cor_df <- cor_df[cor_df$Var1 != cor_df$Var2, ]
+
+#Remove duplicate pairs (since correlation matrix is symmetric)
+cor_df <- cor_df[!duplicated(t(apply(cor_df[, 1:2], 1, sort))), ]
+
+# Filter for highly correlated pairs (e.g., |r| > 0.9)
+high_cor_df <- cor_df[abs(cor_df$Freq) > 0.9, ]
+
+# Strategy: Keep only one variable from each correlated pair
+genes_to_remove <- unique(high_cor_df$Var2)
+
+# Create reduced dataframe by removing redundant genes
+df_reduced <- df[, !(colnames(df) %in% genes_to_remove)]
+
+
+# Optional: View how many genes were removed
+cat("Removed", length(genes_to_remove), "redundant genes.\n")
+cat("Remaining genes:", ncol(df_reduced), "\n")
+
+# SHAPIRO WILK TEST
+shapiro_pvals <- sapply(df_reduced, function(x) {
+  if(length(unique(x)) < 3) return(NA)  # Not enough variation to test
+  shapiro.test(x)$p.value
+})
+
+# Remove NA p-values (genes with too few unique values)
+shapiro_pvals <- shapiro_pvals[!is.na(shapiro_pvals)]
+
+# Adjust p-values for multiple testing using Benjamini-Hochberg (FDR)
+p_adj <- p.adjust(shapiro_pvals, method = "BH")
+
+# Summary using the P-value 0.05 as threshold to reject or not the hypothesis
+cat("Number of genes tested:", length(shapiro_pvals), "\n")
+cat("Number of genes passing normality (adj p > 0.05):", sum(p_adj > 0.05), "\n")
+cat("Number of genes failing normality (adj p <= 0.05):", sum(p_adj <= 0.05), "\n")
+
+# Select genes that pass normality
+normal_genes <- names(p_adj[p_adj > 0.05])
+cat("In conclusion there are", length(normal_genes) ,"that achieve the assumption to have a normal distribution ")
+
+# Filter original df to keep only normal genes + Class
+df_filtered <- df_reduced[, c(normal_genes)]
+
+# LDA Model 
+df_full <- load_gene_subset(group_number = 7, include_class = TRUE)
+df_filtered$Class <- as.factor(df_full$Class)
+# df_filtered$Class <- factor(df_filtered$Class, levels = c(1, 2), labels = c("Non-invasive", "Invasive"))
+
+# Run LDA using only selected features
+lda_model <- lda(Class ~ ., data = df_filtered)
+
+# Project data into LDA space for visualization
+lda_projection <- predict(lda_model)
+
+# View the model Summary 
+summary(lda_model)
+
+# Predict class for the same data
+predictions <- predict(lda_model, newdata = df)
+
+# Model Evaluation
+# class==1 ‘non-invasive cancer’  and class==2 ‘invasive cancer’ 
+cm <- confusionMatrix(as.factor(predictions$class), as.factor(df_filtered$Class), positive = "1")
+print(cm)
+
+
+# Access precision (called "Pos Pred Value") and specificity
+precision <- cm$byClass["Pos Pred Value"]
+sensitivity <- cm$byClass["Sensitivity"]
+specificity <- cm$byClass["Specificity"]
+
+
+add_results(
+  model = "LDA v Sooman",
+  hyperparameter = "prior=0.5",
+  precision = precision,
+  sensitivity = sensitivity,
+  specificity = specificity
+)
+
+```
+
+# MODEL SVM
+```{r pressure, echo=FALSE}
+
+```

@@ -4,8 +4,6 @@ output: pdf_document
 date: "2025-06-03"
 ---
 
-
-
 # FUNCTIONS
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
@@ -46,8 +44,6 @@ load_gene_subset <- function(group_number,
 }
 
 
-#Model Evaluation 
-
 # Initialize empty results data frame
 results_table <- data.frame(
   Model = character(),
@@ -72,6 +68,18 @@ add_results <- function(model, hyperparameter, precision, sensitivity, specifici
   # Use global assignment to update results_table
   assign("results_table", rbind(results_table, new_row), envir = .GlobalEnv)
 }
+
+# Function to compute Fisher score for one feature
+fisher_score <- function(x, labels) {
+  cls1 <- x[labels == classes[1]]
+  cls2 <- x[labels == classes[2]]
+  
+  num <- (mean(cls1) - mean(cls2))^2
+  den <- var(cls1) + var(cls2)
+  
+  if (den == 0) return(0) else return(num / den)
+}
+
 ```
 # Feature subset selection is the process of identifying and removing as much irrelevant and redundant information as possible. 
 
@@ -157,19 +165,21 @@ add_results(
 
 #Conclusion:
 # There is not enough arguments to determine the thresholds for the variance. Additionally, the results in the LDA feature reduction simplified the model to 2 features
+
+head(results_table)
 ```
 
-# FEATURE SELECTION LDA + SHAPIRO WILK TEST + MODEL LDA (SIMILAR WITH MODEL #4)
+# FEATURE SELECTION LDA + SHAPIRO WILK TEST + FISHER CRITERION + MODEL LDA (SIMILAR WITH MODEL #4)
 ```{r pressure, echo=FALSE}
-# LDA Dimensionality Reduction and Model  -- VERSION 2
-# Conclusion: The approach using LDA for dimensionality reduction was: 
+# LDA Dimensionality Reduction and Model  -- VERSION 1
+# The approach using LDA for dimensionality reduction was: 
 # 1. Check normality distribution across all features to double check if achieve the assumption requirement, using Shapiro Wilk Test. 
 # 2. Remove NA p-values
 # 3. Adjust p-values because the multiple testing problem - using Benjamini-Hochberg Works reducing the False Discovery Rate (FDR), the expected proportion of false positive 
 # 4. Summary using the P-value 0.05 as threshold to reject or not the hypothesis
+# 5. Fisher Criterion - to select the most discriminate and appropriate features. Maximizing fisher criterion
 
 # Dimensionality Reduction
-
 # Load Data
 df <- load_gene_subset(group_number = 7, include_class = TRUE)
 
@@ -187,6 +197,7 @@ shapiro_pvals <- sapply(gene_data, function(x) {
 shapiro_pvals <- shapiro_pvals[!is.na(shapiro_pvals)]
 
 # Adjust p-values for multiple testing using Benjamini-Hochberg (FDR)
+# Benjamini-Hochberg (FDR) - solved the problem of multiple testing problem. Inflate false positive p-value controlling the FDR (False Discovery Rate), which is the expected proportion of false positives among the declared results.
 p_adj <- p.adjust(shapiro_pvals, method = "BH")
 
 # Summary using the P-value 0.05 as threshold to reject or not the hypothesis
@@ -202,13 +213,6 @@ cat("In conclusion there are", length(normal_genes) ,"that achieve the assumptio
 # Filter original df to keep only normal genes + Class
 df_filtered <- df[, c(normal_genes, "Class")]
 
-# ---------------------------------------------------------------------------------------------------
-#Double check if it really matters to use this plots
-# Plot histogram of raw p-values
-# hist(shapiro_pvals, breaks = 50, main = "Histogram of Shapiro-Wilk p-values", xlab = "p-value")
-# Plot histogram of adjusted p-values
-# hist(p_adj, breaks = 50, main = "Histogram of Adjusted p-values (FDR)", xlab = "Adjusted p-value")
-# ---------------------------------------------------------------------------------------------------
 
 # Visualize QQ plots for a random sample of 20 genes that pass normality
 sample_genes <- sample(normal_genes, min(20, length(normal_genes)))
@@ -222,18 +226,47 @@ for (g in sample_genes) {
 
 par(mfrow = c(1,1))  # Reset plotting layout
 
+
+# Fisher Criterion
+# Separate features and labels
+features <- df_filtered[, -ncol(df_filtered)] 
+labels <- df_filtered$Class
+classes <- levels(labels)
+
+# Apply fisher function to all columns
+scores <- apply(features, 2, fisher_score, labels = labels)
+
+# Create data frame with scores
+fisher_df <- data.frame(
+  Feature = names(scores),
+  FisherScore = scores
+)
+
+# Sort by score (descending)
+fisher_df <- fisher_df[order(-fisher_df$FisherScore), ]
+
 # LDA Model 
-  df_filtered$Class <- as.factor(df_filtered$Class)
-# df_filtered$Class <- factor(df_filtered$Class, levels = c(1, 2), labels = c("Non-invasive", "Invasive"))
+df_filtered$Class <- as.factor(df_filtered$Class)
 
 # Run LDA using only selected features
 lda_model <- lda(Class ~ ., data = df_filtered)
+
+
+# Ranking the features
+weights <- abs(lda_model$scaling[, 1])
+feature_importance <- data.frame(
+  Gene = names(weights),
+  Weight = weights
+)
+selected_genes <- feature_importance[order(-feature_importance$Weight), ]
+
 
 # Project data into LDA space for visualization
 lda_projection <- predict(lda_model)
 
 # View the model Summary 
 summary(lda_model)
+
 
 # Predict class for the same data
 predictions <- predict(lda_model, newdata = df)

@@ -1,0 +1,269 @@
+---
+title: "Group Project"
+output: pdf_document
+date: "2025-06-03"
+---
+
+# FUNCTIONS
+```{r setup, include=FALSE}
+
+load_gene_subset <- function(group_number,
+                             expression_file = "gene-expression-invasive-vs-noninvasive-cancer.csv",
+                             subset_file = "teamsubsets.csv",
+                             include_class = TRUE) {
+  library(dplyr)
+  library(caret)
+  library(glmnet)
+  library(ggplot2)
+  library(reshape2)
+  library(pheatmap)
+  library(MASS)
+
+  # Load main dataset
+  dataframe <- read.csv(file = expression_file)
+
+  # Load subset file
+  df_subsets <- read.csv(file = subset_file, sep = ' ')
+
+  # Filter by group number
+  reg_id <- df_subsets[group_number, ]
+
+  # Extract gene indices (remove the ID column)
+  subsets <- as.numeric(reg_id[-1])
+
+  # Filter gene expression dataframe using selected gene indices
+  df <- dataframe[, subsets]
+
+  # Optionally, add class and cancer type
+  if (include_class) {
+    df$Class <- dataframe$Class
+  }
+
+  return(df)
+}
+
+# Initialize empty results data frame
+results_table <- data.frame(
+  Model = character(),
+  Hyperparameter = character(),
+  Precision = numeric(),
+  Sensitivity = numeric(),
+  Specificity = numeric(),
+  stringsAsFactors = FALSE
+)
+
+# Define the function
+add_results <- function(model, hyperparameter, precision, sensitivity, specificity) {
+  new_row <- data.frame(
+    Model = model,
+    Hyperparameter = hyperparameter,
+    Precision = precision,
+    Sensitivity = sensitivity,
+    Specificity = specificity,
+    stringsAsFactors = FALSE
+  )
+  
+  # Use global assignment to update results_table
+  assign("results_table", rbind(results_table, new_row), envir = .GlobalEnv)
+}
+
+# Fisher Criterion Function (for multiple features)
+fisher_criterion <- function(X, y) {
+  classes <- unique(y)
+  if (length(classes) != 2) stop("Only works for binary classification.")
+  
+  X1 <- X[y == classes[1], , drop = FALSE]
+  X2 <- X[y == classes[2], , drop = FALSE]
+  
+  mean1 <- colMeans(X1)
+  mean2 <- colMeans(X2)
+  
+  Sw1 <- cov(X1)
+  Sw2 <- cov(X2)
+  Sw <- Sw1 + Sw2
+  
+  n1 <- nrow(X1)
+  n2 <- nrow(X2)
+  mean_diff <- matrix(mean1 - mean2, ncol = 1)
+  Sb <- (n1 * n2) / (n1 + n2) * (mean_diff %*% t(mean_diff))
+  
+  J <- sum(diag(Sb)) / sum(diag(Sw))
+  return(J)
+}
+
+# Greedy Feature Selection
+greedy_fisher_selection <- function(X, y, d, min_score_threshold = 0.05) {
+  remaining_features <- colnames(X)
+  selected_features <- c()
+  selected_scores <- c()
+  
+  for (k in 1:d) {
+    best_score <- -Inf
+    best_feature <- NULL
+    
+    for (feature in setdiff(remaining_features, selected_features)) {
+      candidate_features <- c(selected_features, feature)
+      score <- fisher_criterion(X[, candidate_features, drop = FALSE], y)
+      
+      if (score > best_score) {
+        best_score <- score
+        best_feature <- feature
+      }
+    }
+    
+    # Stop if score is below threshold
+    if (best_score < min_score_threshold) {
+      message(sprintf("Stopping early at step %d — Fisher score %.4f < threshold %.4f", k, best_score, min_score_threshold))
+      break
+    }
+    
+    selected_features <- c(selected_features, best_feature)
+    selected_scores <- c(selected_scores, best_score)
+    
+    message(sprintf("Selected %s (step %d) | Fisher Score: %.4f", best_feature, k, best_score))
+  }
+  
+  return(list(features = selected_features, scores = selected_scores))
+}
+
+
+
+greedy_fisher_selection_with_threshold <- function(X, y, max_features = 50, min_gain = 0.01) {
+  remaining_features <- colnames(X)
+  selected_features <- c()
+  fisher_scores <- c()
+  prev_score <- 0
+
+  for (k in 1:max_features) {
+    best_score <- -Inf
+    best_feature <- NULL
+
+    for (feature in setdiff(remaining_features, selected_features)) {
+      candidate_features <- c(selected_features, feature)
+      score <- fisher_criterion(X[, candidate_features, drop = FALSE], y)
+      
+      if (score > best_score) {
+        best_score <- score
+        best_feature <- feature
+      }
+    }
+
+    gain <- best_score - prev_score
+    if (gain < min_gain) {
+      message(sprintf("Stopping early at %d features (gain %.4f < %.4f)", k - 1, gain, min_gain))
+      break
+    }
+
+    selected_features <- c(selected_features, best_feature)
+    fisher_scores <- c(fisher_scores, best_score)
+    prev_score <- best_score
+
+    message(sprintf("Selected: %s | Step: %d | Fisher Score: %.4f | Gain: %.4f", best_feature, k, best_score, gain))
+  }
+
+  return(list(features = selected_features, scores = fisher_scores))
+}
+
+
+```
+
+# FEATURE SELECTION
+# To tackle the first point we implmented different techniques to approach different point of views
+
+# SHAPIRO WILK TEST + FISHER CRITERION + LDA
+```{r setup, include=FALSE}
+# LDA Dimensionality Reduction and Model  -- VERSION 1
+# The approach using LDA for dimensionality reduction was: 
+# 1. Check normality distribution across all features to double check if achieve the assumption requirement, using Shapiro Wilk Test. 
+# 2. Remove NA p-values
+# 3. Adjust p-values because the multiple testing problem - using Benjamini-Hochberg Works reducing the False Discovery Rate (FDR), the expected proportion of false positive 
+# 4. Summary using the P-value 0.05 as threshold to reject or not the hypothesis
+# 5. Perform LDA to get features weights
+# 6. Implemented Fisher criterion to identify which are the most discriminated and appropiate features
+
+# Dimensionality Reduction
+
+# Load Data
+df <- load_gene_subset(group_number = 7, include_class = TRUE)
+
+# Extract Predictors
+gene_data <- df[, setdiff(names(df), "Class")]
+
+# Check Normality of Predictors using Shapiro Wilk Test
+# Shapiro Wilk Test: Is a statistical test used to assess wether a dataset follows a normal distribution. It doesn't work well with large sample size
+shapiro_pvals <- sapply(gene_data, function(x) {
+  if(length(unique(x)) < 3) return(NA)  # Not enough variation to test
+  shapiro.test(x)$p.value
+})
+
+# Remove NA p-values (genes with too few unique values)
+shapiro_pvals <- shapiro_pvals[!is.na(shapiro_pvals)]
+
+# Adjust p-values for multiple testing using Benjamini-Hochberg (FDR)
+# Benjamini-Hochberg (FDR) - solved the problem of multiple testing problem. Inflate false positive p-value controlling the FDR (False Discovery Rate), which is the expected proportion of false positives among the declared results.
+p_adj <- p.adjust(shapiro_pvals, method = "BH")
+
+# Summary using the P-value 0.05 as threshold to reject or not the hypothesis
+cat("Number of genes tested:", length(shapiro_pvals), "\n")
+cat("Number of genes passing normality (adj p > 0.05):", sum(p_adj > 0.05), "\n")
+cat("Number of genes failing normality (adj p <= 0.05):", sum(p_adj <= 0.05), "\n")
+
+# Select genes that pass normality
+normal_genes <- names(p_adj[p_adj > 0.05])
+cat("In conclusion there are", length(normal_genes) ,"that achieve the assumption to have a normal distribution ")
+
+
+# Filter original df to keep only normal genes + Class
+df_filtered <- df[, c(normal_genes, "Class")]
+
+
+# Visualize QQ plots for a random sample of 20 genes that pass normality
+sample_genes <- sample(normal_genes, min(20, length(normal_genes)))
+
+par(mfrow = c(4, 5), mar = c(2, 2, 2, 1))
+
+for (g in sample_genes) {
+  qqnorm(gene_data[[g]], main = g, cex.main = 0.8)
+  qqline(gene_data[[g]], col = "red")
+}
+
+par(mfrow = c(1,1))  # Reset plotting layout
+
+
+
+# Fisher criterion: following a greedy policy criteria
+# The main reason of follow a Fisher criterion is to select the most appropiate features. 
+# Split off labels
+X <- df_filtered[, setdiff(names(df_filtered), "Class")]
+y <- df_filtered$Class
+classes <- levels(y)
+
+result <- greedy_fisher_selection(X, y, d = 120, min_score_threshold = 2)
+result_df <- data.frame(Feature = result$features,Fisher_Score = result$scores)
+
+
+# LDA Model 
+selected_features <- result$features
+
+df_filtered$Class <- as.factor(df_filtered$Class)
+
+# Run LDA using only selected features
+lda_model <- lda(Class ~ ., data = df_filtered)
+
+
+# Ranking the features
+weights <- abs(lda_model$scaling[, 1])
+feature_importance <- data.frame(
+  Gene = names(weights),
+  Weight = weights
+)
+
+selected_genes <- feature_importance[order(-feature_importance$Weight), ]
+```
+
+
+#HIGH VARIANCE
+
+#LASS0 1
+
+#CORRELATION MATRIX

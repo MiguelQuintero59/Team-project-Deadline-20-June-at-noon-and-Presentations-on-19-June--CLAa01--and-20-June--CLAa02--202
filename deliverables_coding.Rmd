@@ -91,112 +91,25 @@ fisher_criterion <- function(X, y) {
   return(J)
 }
 
-# Greedy Feature Selection
-greedy_fisher_selection_minmax <- function(X, y, d, min_gain_threshold = 0.01) {
-  remaining_features <- colnames(X)
-  selected_features <- c()
-  selected_scores <- c()
+read_gene_data <- function(train_path = "train_data.csv", test_path = "test_data.csv") {
+  # Read the CSV files
+  train_df <- read.csv(train_path)
+  test_df <- read.csv(test_path)
   
-  current_score <- 0
+  # Split into genes and labels
+  train_genes <- train_df[, !(names(train_df) %in% "Class")]
+  train_labels <- train_df$Class
   
-  for (k in 1:d) {
-    best_gain <- -Inf
-    best_feature <- NULL
-    best_score <- NULL
-    
-    for (feature in setdiff(remaining_features, selected_features)) {
-      candidate_features <- c(selected_features, feature)
-      new_score <- fisher_criterion(X[, candidate_features, drop = FALSE], y)
-      gain <- new_score - current_score
-      
-      if (gain > best_gain) {
-        best_gain <- gain
-        best_feature <- feature
-        best_score <- new_score
-      }
-    }
-    
-    # Stop if marginal gain is too small
-    if (best_gain < min_gain_threshold) {
-      message(sprintf("Stopping early at step %d — ΔJ = %.4f < threshold %.4f", k, best_gain, min_gain_threshold))
-      break
-    }
-    
-    selected_features <- c(selected_features, best_feature)
-    selected_scores <- c(selected_scores, best_score)
-    current_score <- best_score
-    
-    message(sprintf("Selected %s (step %d) | Gain: %.4f | Fisher Score: %.4f", best_feature, k, best_gain, best_score))
-  }
+  test_genes <- test_df[, !(names(test_df) %in% "Class")]
+  test_labels <- test_df$Class
   
-  return(list(features = selected_features, scores = selected_scores))
-}
-
-# Advanced Greedy Feature Selection using Fisher Criterion + Correlation Penalty
-# Combines Fisher Score Gain and Redundancy Penalty
-
-greedy_fisher_selection_with_penalty <- function(X, y, d = 50, lambda = 0.5, min_gain_threshold = 0.01) {
-  selected_features <- c()
-  selected_scores <- c()
-  feature_names <- colnames(X)
-  remaining_features <- feature_names
-
-  # Standardize X for correlation computation
-  X_scaled <- scale(X)
-
-  for (k in 1:d) {
-    best_score <- -Inf
-    best_feature <- NULL
-    best_gain <- NULL
-
-    for (candidate in setdiff(remaining_features, selected_features)) {
-      # Evaluate Fisher score with candidate + existing selected
-      candidate_features <- c(selected_features, candidate)
-      fisher_score_new <- fisher_criterion(X_scaled[, candidate_features, drop = FALSE], y)
-
-      # Compute previous Fisher score
-      if (length(selected_features) == 0) {
-        fisher_score_prev <- 0
-      } else {
-        fisher_score_prev <- fisher_criterion(X_scaled[, selected_features, drop = FALSE], y)
-      }
-
-      delta_j <- fisher_score_new - fisher_score_prev
-
-      # Compute redundancy penalty
-      if (length(selected_features) > 0) {
-        correlations <- sapply(selected_features, function(sf) {
-          abs(cor(X_scaled[, candidate], X_scaled[, sf], use = "pairwise.complete.obs"))
-        })
-        redundancy_penalty <- max(correlations)
-      } else {
-        redundancy_penalty <- 0
-      }
-
-      # Final score: Fisher gain - lambda * redundancy
-      final_score <- delta_j - lambda * redundancy_penalty
-
-      if (final_score > best_score) {
-        best_score <- final_score
-        best_feature <- candidate
-        best_gain <- delta_j
-      }
-    }
-
-    # Stop if gain is too low
-    if (best_gain < min_gain_threshold) {
-      message(sprintf("Stopping early at step %d — ΔJ = %.4f < threshold %.4f", 
-                      k, best_gain, min_gain_threshold))
-      break
-    }
-
-    selected_features <- c(selected_features, best_feature)
-    selected_scores <- c(selected_scores, best_score)
-    message(sprintf("Selected %s (step %d) | Gain: %.4f | Score: %.4f", 
-                    best_feature, k, best_gain, best_score))
-  }
-
-  return(list(features = selected_features, scores = selected_scores))
+  # Return as a list
+  return(list(
+    train_genes = train_genes,
+    train_labels = train_labels,
+    test_genes = test_genes,
+    test_labels = test_labels
+  ))
 }
 
 
@@ -205,9 +118,15 @@ greedy_fisher_selection_with_penalty <- function(X, y, d = 50, lambda = 0.5, min
 # FEATURE SELECTION
 # To tackle the first point we implmented different techniques to approach different point of views
 
-# Contribution Performance
+# The goal of feature selection is to highligth those features that have contribution performance towards the prediction variable. 
 # LDA (weights) - FEATURE SELECTION 
 ```{r setup, include=FALSE}
+# LDA Dimensionality Reduction and Model  -- VERSION 1
+# The approach using LDA for dimensionality reduction was: 
+# 1. Identify contribution performance using LDA to get features weights
+# 2. Perform correlation matrix
+# 3. Compute LDA weights
+
 
 set.seed(123) 
 results <- data.frame(Iteration = integer(),
@@ -217,13 +136,6 @@ results <- data.frame(Iteration = integer(),
                       Specificity = double(),
                       Genes = character(),
                       stringsAsFactors = FALSE)
-
-# LDA Dimensionality Reduction and Model  -- VERSION 1
-# The approach using LDA for dimensionality reduction was: 
-# 1. Identify contribution performance using LDA to get features weights
-# 2. Perform correlation matrix
-# 3. Compute LDA weights
-
 
 # Load Data
 df <- load_gene_subset(group_number = 7, include_class = TRUE)
@@ -285,7 +197,7 @@ cat("Train Variance:", overall_train_var, "\n")
 cat("Test Variance:", overall_test_var, "\n")
 
 
-# ----- Save Training and Test Data -----
+# ---------- Save Training and Test Data ----------
 # Combine gene expression and class label
 #train_df <- data.frame(train_genes, Class = train_labels)
 #test_df <- data.frame(test_genes, Class = test_labels)
@@ -293,7 +205,7 @@ cat("Test Variance:", overall_test_var, "\n")
 # Save to CSV files
 #write.csv(train_df, "train_data.csv", row.names = FALSE)
 #write.csv(test_df, "test_data.csv", row.names = FALSE)
-# --------------------------------------
+# -----------------------------------------------
 
 # === Random Search for Best Gene Subset ===
 n_iter <- 30  # number of random samples
@@ -355,7 +267,6 @@ for (i in 1:n_iter) {
 }
 
 # Sort by precision or another metric of your choice
-
 top_results <- results[order(-results$Precision_Train), ]
 
 top_results <- top_results[

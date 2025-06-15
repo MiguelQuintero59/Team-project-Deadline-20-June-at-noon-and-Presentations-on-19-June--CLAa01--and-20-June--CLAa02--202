@@ -146,7 +146,6 @@ compute_global_statistics <- function(train_genes, test_genes) {
 }
 
 
-
 results <- data.frame(Iteration = integer(),
                       NumGenes = integer(),
                       FeatureSelection = logical(),
@@ -210,6 +209,9 @@ test_genes <- data$test_genes
 test_labels <- data$test_labels
 # ----------------------------------------------------
 
+# Standardize training data
+  train_genes <- scale(train_genes)
+
 # === Random Search for Best Gene Subset ===
 
 n_iter <- 30  # number of random samples
@@ -219,7 +221,6 @@ results <- data.frame()
 for (i in 1:n_iter) {
   num_genes <- sample(gene_range, 1)
   selected_genes <- sample(all_genes, num_genes)
-
   
   # Prepare training and test sets with selected genes
   train_df <- data.frame(train_genes[, selected_genes], Class = train_labels)
@@ -266,7 +267,8 @@ for (i in 1:n_iter) {
       Specificity_Test = specificity_test,
       
       Genes = paste(selected_genes, collapse = ",")
-    ))
+    )
+    )
   }
 }
 
@@ -292,9 +294,35 @@ best_results <- top_results[
   top_results$Sensitivity_Test == max_sensitivity,
 ]
 
-# Considering the classification metrics Precision, Recall and Specificity and the trade-off between them. The iteration 10th have the best trade-off
-# Precision: 0.8000000, Recall: 0.5714286, Specificity: 0.875, with a Total of 34 Genes as feature Selection. 
+# Considering the classification metrics Precision, Recall and Specificity and the trade-off between them. The iteration 12th have the best trade-off
+# Precision: 0.7500000, Recall: 0.4285714, Specificity: 0.875, with a Total of 34 Genes as feature Selection. 
 # As recommendation we could evaluate the normality of the features and perform transformation techniques to achieve a higher result.
 
 
+```
+
+# Random Forest
+```{r setup, include=FALSE}
+set.seed(125) 
+
+# Load Data
+df <- load_gene_subset(group_number = 7, include_class = TRUE)
+
+# Extract Predictors
+gene_data <- df[, setdiff(names(df), "Class")]
+
+# Separate predictors and class
+genes_only <- df[, setdiff(names(df), "Class")]
+labels <- df$Class
+all_genes <- colnames(genes_only)
+
+# Create stratified train/test split
+train_index <- createDataPartition(labels, p = 0.8, list = FALSE)
+train_genes <- genes_only[train_index, ]
+test_genes <- genes_only[-train_index, ]
+train_labels <- labels[train_index]
+test_labels <- labels[-train_index]
+
+# Standardized Data
+global_stats <- compute_global_statistics(train_genes, test_genes)
 ```

@@ -53,10 +53,11 @@ results_table <- data.frame(
 )
 
 # Define the function
-add_results <- function(model, hyperparameter, precision, sensitivity, specificity) {
+add_results <- function(model, hyperparameter, featureselection, precision, sensitivity, specificity) {
   new_row <- data.frame(
     Model = model,
     Hyperparameter = hyperparameter,
+    FeatureSelection = featureselection,
     Precision = precision,
     Sensitivity = sensitivity,
     Specificity = specificity,
@@ -67,31 +68,8 @@ add_results <- function(model, hyperparameter, precision, sensitivity, specifici
   assign("results_table", rbind(results_table, new_row), envir = .GlobalEnv)
 }
 
-# Fisher Criterion Function (for multiple features)
-fisher_criterion <- function(X, y) {
-  classes <- unique(y)
-  if (length(classes) != 2) stop("Only works for binary classification.")
-  
-  X1 <- X[y == classes[1], , drop = FALSE]
-  X2 <- X[y == classes[2], , drop = FALSE]
-  
-  mean1 <- colMeans(X1)
-  mean2 <- colMeans(X2)
-  
-  Sw1 <- cov(X1)
-  Sw2 <- cov(X2)
-  Sw <- Sw1 + Sw2
-  
-  n1 <- nrow(X1)
-  n2 <- nrow(X2)
-  mean_diff <- matrix(mean1 - mean2, ncol = 1)
-  Sb <- (n1 * n2) / (n1 + n2) * (mean_diff %*% t(mean_diff))
-  
-  J <- sum(diag(Sb)) / sum(diag(Sw))
-  return(J)
-}
-
-read_gene_data <- function(train_path = "train_data.csv", test_path = "test_data.csv") {
+#Read training and testing dataset
+read_gene_data <- function(train_path = "data/train_data.csv", test_path = "data/test_data.csv") {
   # Read the CSV files
   train_df <- read.csv(train_path)
   test_df <- read.csv(test_path)
@@ -113,29 +91,85 @@ read_gene_data <- function(train_path = "train_data.csv", test_path = "test_data
 }
 
 
-```
+remove_correlated_features <- function(train_data, threshold = 0.8) {
+  # Compute correlation matrix
+  cor_matrix <- cor(train_data, method = "pearson", use = "pairwise.complete.obs")
+  cor_df <- as.data.frame(as.table(cor_matrix))
+  
+  # Remove self-correlations
+  cor_df <- cor_df[cor_df$Var1 != cor_df$Var2, ]
+  
+  # Remove duplicate pairs (symmetry in correlation matrix)
+  cor_df <- cor_df[!duplicated(t(apply(cor_df[, 1:2], 1, sort))), ]
+  
+  # Filter for highly correlated pairs
+  high_cor_df <- cor_df[abs(cor_df$Freq) > threshold, ]
+  
+  # Keep only one variable from each correlated pair
+  genes_to_remove <- unique(high_cor_df$Var2)
+  
+  # Remove redundant features
+  df_reduced <- train_data[, !(colnames(train_data) %in% genes_to_remove)]
+  
+  return(df_reduced)
+}
 
-# FEATURE SELECTION
-# To tackle the first point we implmented different techniques to approach different point of views
 
-# The goal of feature selection is to highligth those features that have contribution performance towards the prediction variable. 
-# LDA (weights) - FEATURE SELECTION 
-```{r setup, include=FALSE}
-# LDA Dimensionality Reduction and Model  -- VERSION 1
-# The approach using LDA for dimensionality reduction was: 
-# 1. Identify contribution performance using LDA to get features weights
-# 2. Perform correlation matrix
-# 3. Compute LDA weights
+compute_global_statistics <- function(train_genes, test_genes) {
+  # Column-wise means
+  train_means <- colMeans(train_genes)
+  test_means <- colMeans(test_genes)
+  
+  # Column-wise variances
+  train_vars <- apply(train_genes, 2, var)
+  test_vars  <- apply(test_genes, 2, var)
+  
+  # Global average mean and variance
+  overall_train_mean <- mean(train_means)
+  overall_test_mean  <- mean(test_means)
+  
+  overall_train_var <- mean(train_vars)
+  overall_test_var  <- mean(test_vars)
+  
+  # Print values
+  cat("Train Mean:", overall_train_mean, "\n")
+  cat("Test Mean:", overall_test_mean, "\n")
+  cat("Train Variance:", overall_train_var, "\n")
+  cat("Test Variance:", overall_test_var, "\n")
+  
+  # Return as data frame
+  return(data.frame(
+    Dataset = c("Train", "Test"),
+    Mean = c(overall_train_mean, overall_test_mean),
+    Variance = c(overall_train_var, overall_test_var)
+  ))
+}
 
 
-set.seed(123) 
+
 results <- data.frame(Iteration = integer(),
                       NumGenes = integer(),
+                      FeatureSelection = logical(),
                       Precision = double(),
                       Sensitivity = double(),
                       Specificity = double(),
                       Genes = character(),
                       stringsAsFactors = FALSE)
+
+
+```
+# The goal of feature selection is to highligth those features that have contribution performance towards the prediction variable. 
+# LDA Feature Selection
+```{r setup, include=FALSE}
+
+set.seed(125) 
+# LDA Dimensionality Reduction and Model  -- VERSION 1
+# The approach using LDA for dimensionality reduction is: 
+# 1. Identify contribution performance using LDA to get features weights
+# 2. Standardized Data
+# 3. Random Search for Best Gene Subset
+# 4. Prepare training and test sets with selected genes 
+# 5. Extract metrics
 
 # Load Data
 df <- load_gene_subset(group_number = 7, include_class = TRUE)
@@ -143,30 +177,9 @@ df <- load_gene_subset(group_number = 7, include_class = TRUE)
 # Extract Predictors
 gene_data <- df[, setdiff(names(df), "Class")]
 
-#To avoid collinearity (redundant variables) removed correlated features
-# Compute correlation matrix
-cor_matrix <- cor(df, method = "pearson", use = "pairwise.complete.obs")
-cor_df <- as.data.frame(as.table(cor_matrix))
-
-# Remove self-correlations
-cor_df <- cor_df[cor_df$Var1 != cor_df$Var2, ]
-
-#Remove duplicate pairs (since correlation matrix is symmetric)
-cor_df <- cor_df[!duplicated(t(apply(cor_df[, 1:2], 1, sort))), ]
-
-# Filter for highly correlated pairs (e.g., |r| > 0.9)
-high_cor_df <- cor_df[abs(cor_df$Freq) > 0.8, ]
-
-# Strategy: Keep only one variable from each correlated pair
-genes_to_remove <- unique(high_cor_df$Var2)
-length(genes_to_remove)
-
-# Create reduced dataframe by removing redundant genes
-df_reduced <- df[, !(colnames(df) %in% genes_to_remove)]
-
 # Separate predictors and class
-genes_only <- df_reduced[, setdiff(names(df_reduced), "Class")]
-labels <- df_reduced$Class
+genes_only <- df[, setdiff(names(df), "Class")]
+labels <- df$Class
 all_genes <- colnames(genes_only)
 
 # Create stratified train/test split
@@ -176,54 +189,44 @@ test_genes <- genes_only[-train_index, ]
 train_labels <- labels[train_index]
 test_labels <- labels[-train_index]
 
-# Column-wise means
-train_means <- colMeans(train_genes)
-test_means <- colMeans(test_genes)
-
-# Column-wise variances
-train_vars <- apply(train_genes, 2, var)
-test_vars  <- apply(test_genes, 2, var)
-
-# Global average mean and variance to avoid Data Leakage
-overall_train_mean <- mean(train_means)
-overall_test_mean <- mean(test_means)
-
-overall_train_var <- mean(train_vars)
-overall_test_var <- mean(test_vars)
-
-cat("Train Mean:", overall_train_mean, "\n")
-cat("Test Mean:", overall_test_mean, "\n")
-cat("Train Variance:", overall_train_var, "\n")
-cat("Test Variance:", overall_test_var, "\n")
-
+# Standardized Data
+global_stats <- compute_global_statistics(train_genes, test_genes)
 
 # ---------- Save Training and Test Data ----------
 # Combine gene expression and class label
-#train_df <- data.frame(train_genes, Class = train_labels)
-#test_df <- data.frame(test_genes, Class = test_labels)
+train_df <- data.frame(train_genes, Class = train_labels)
+test_df <- data.frame(test_genes, Class = test_labels)
 
 # Save to CSV files
-#write.csv(train_df, "train_data.csv", row.names = FALSE)
-#write.csv(test_df, "test_data.csv", row.names = FALSE)
+write.csv(train_df, "data/train_data.csv", row.names = FALSE)
+write.csv(test_df, "data/test_data.csv", row.names = FALSE)
 # -----------------------------------------------
 
+# ---------- Reading Training and Test Data ----------
+data <- read_gene_data()
+train_genes <- data$train_genes
+train_labels <- data$train_labels
+test_genes <- data$test_genes
+test_labels <- data$test_labels
+# ----------------------------------------------------
+
 # === Random Search for Best Gene Subset ===
+
 n_iter <- 30  # number of random samples
 gene_range <- 10:60  # range of gene subset sizes to try
 results <- data.frame()
 
-
 for (i in 1:n_iter) {
   num_genes <- sample(gene_range, 1)
   selected_genes <- sample(all_genes, num_genes)
-  
-  # Prepare data
-  df_filtered <- data.frame(genes_only[, selected_genes], Class = labels)
+
   
   # Prepare training and test sets with selected genes
   train_df <- data.frame(train_genes[, selected_genes], Class = train_labels)
-  test_df <- data.frame(test_genes[, selected_genes], Class = test_labels)
+  test_df <- data.frame(test_genes, Class = test_labels)
   
+  # Compute correlation matrix
+  train_df <- remove_correlated_features(train_df)
   
   # Fit LDA model
   lda_model <- tryCatch({
@@ -252,6 +255,7 @@ for (i in 1:n_iter) {
     results <- rbind(results, data.frame(
       Iteration = i,
       NumGenes = num_genes,
+      FeatureSelection = TRUE,
       
       Precision_Train = precision_train,
       Sensitivity_Train = sensitivity_train,
@@ -270,15 +274,27 @@ for (i in 1:n_iter) {
 top_results <- results[order(-results$Precision_Train), ]
 
 top_results <- top_results[
-  top_results$NumGenes >= 35 &
   top_results$Precision_Train != 1 &
   top_results$Sensitivity_Train != 1 &
-  top_results$Specificity_Train != 1,
+  top_results$Specificity_Train != 1 &
+  top_results$Precision_Test != 1 &
+  top_results$Sensitivity_Test != 1 &
+  top_results$Specificity_Test != 1,
 ]
 
-# Show top-performing gene sets
-print(head(top_results, 5))
+# Get the max values
+max_precision <- max(top_results$Precision_Test, na.rm = TRUE)
+max_sensitivity <- max(top_results$Sensitivity_Test, na.rm = TRUE)
 
+# Filter to rows that match BOTH max precision and max sensitivity
+best_results <- top_results[
+  top_results$Precision_Test == max_precision |
+  top_results$Sensitivity_Test == max_sensitivity,
+]
+
+# Considering the classification metrics Precision, Recall and Specificity and the trade-off between them. The iteration 10th have the best trade-off
+# Precision: 0.8000000, Recall: 0.5714286, Specificity: 0.875, with a Total of 34 Genes as feature Selection. 
+# As recommendation we could evaluate the normality of the features and perform transformation techniques to achieve a higher result.
 
 
 ```

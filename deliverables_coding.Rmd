@@ -210,7 +210,8 @@ test_labels <- data$test_labels
 # ----------------------------------------------------
 
 # Standardize training data
-  train_genes <- scale(train_genes)
+train_genes <- scale(train_genes)
+
 
 # === Random Search for Best Gene Subset ===
 
@@ -323,6 +324,21 @@ test_genes <- genes_only[-train_index, ]
 train_labels <- labels[train_index]
 test_labels <- labels[-train_index]
 
-# Standardized Data
+# Standardized Datas
 global_stats <- compute_global_statistics(train_genes, test_genes)
+
+
+# ---------- Reading Training and Test Data ----------
+data <- read_gene_data()
+train_genes <- data$train_genes
+train_labels <- data$train_labels
+test_genes <- data$test_genes
+test_labels <- data$test_labels
+# ----------------------------------------------------
+
+
+# Standardize training data
+train_genes <- scale(train_genes)
+
+
 ```

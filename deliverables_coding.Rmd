@@ -7,17 +7,19 @@ date: "2025-06-03"
 # FUNCTIONS
 ```{r setup, include=FALSE}
 
+library(dplyr)
+library(caret)
+library(glmnet)
+library(ggplot2)
+library(reshape2)
+library(pheatmap)
+library(MASS)
+library(randomForest)
+
 load_gene_subset <- function(group_number,
                              expression_file = "gene-expression-invasive-vs-noninvasive-cancer.csv",
                              subset_file = "teamsubsets.csv",
                              include_class = TRUE) {
-  library(dplyr)
-  library(caret)
-  library(glmnet)
-  library(ggplot2)
-  library(reshape2)
-  library(pheatmap)
-  library(MASS)
 
   # Load main dataset
   dataframe <- read.csv(file = expression_file)
@@ -302,43 +304,70 @@ best_results <- top_results[
 
 ```
 
-# Random Forest
+# Model:Random Forest  
+# Resample Techinque: K - Fold Cross Validation
 ```{r setup, include=FALSE}
 set.seed(125) 
 
 # Load Data
 df <- load_gene_subset(group_number = 7, include_class = TRUE)
 
-# Extract Predictors
-gene_data <- df[, setdiff(names(df), "Class")]
+# shuffle data to minimize random effects
+shuffled_df <-  df[sample(nrow(df)),]
 
 # Separate predictors and class
-genes_only <- df[, setdiff(names(df), "Class")]
-labels <- df$Class
+genes_only <- shuffled_df[, setdiff(names(shuffled_df), "Class")]
 all_genes <- colnames(genes_only)
 
-# Create stratified train/test split
-train_index <- createDataPartition(labels, p = 0.8, list = FALSE)
-train_genes <- genes_only[train_index, ]
-test_genes <- genes_only[-train_index, ]
-train_labels <- labels[train_index]
-test_labels <- labels[-train_index]
+# Create training 80% and test 20%, 
+train <- createDataPartition(shuffled_df$Class, p = 0.8, list = FALSE, times = 1)
+df_train <- shuffled_df[train,]
+df_test <- shuffled_df[-train,]
 
-# Standardized Datas
-global_stats <- compute_global_statistics(train_genes, test_genes)
+# 1. Random Forest model using repeated 10-fold cross-validation
+# With regression problems the default value is often  mtry = p3 and for classification mtry=√p
+
+num_features <- ncol(df_train) - 1
+sqrt_mtry <- floor(sqrt(num_features))
+
+tunegrid_rf <- expand.grid(
+  mtry = c(max(1, sqrt_mtry - 2), sqrt_mtry, sqrt_mtry + 2)
+)
+
+ctrl <- trainControl(
+  method = "cv",
+  number = 10,
+  savePredictions = "final",  # Save predictions for each fold
+  classProbs = FALSE,
+)
 
 
-# ---------- Reading Training and Test Data ----------
-data <- read_gene_data()
-train_genes <- data$train_genes
-train_labels <- data$train_labels
-test_genes <- data$test_genes
-test_labels <- data$test_labels
-# ----------------------------------------------------
+# Target variable is a factor
+df_train$Class <- as.factor(df_train$Class)
+levels(df_train$Class) <- make.names(levels(df_train$Class))
+
+# Train random forest model with tuneGrid and cross-validation
+model_rf <- train(
+  Class ~ .,
+  data = df_train,
+  method = "rf",
+  trControl = ctrl,
+  tuneGrid = tunegrid_rf,
+  ntree = 100  # number of trees
+)
 
 
-# Standardize training data
-train_genes <- scale(train_genes)
+# Get overall accuracy from resampling results
+accuracy_values <- model_rf$resample$Accuracy
+
+# Calculate misclassification error per fold
+misclassification_errors <- 1 - accuracy_values
+
+cvrf_results <- data.frame(
+  Fold = 1:length(misclassification_errors),
+  Accuracy = accuracy_values,
+  MisclassificationError = misclassification_errors
+)
 
 
 ```

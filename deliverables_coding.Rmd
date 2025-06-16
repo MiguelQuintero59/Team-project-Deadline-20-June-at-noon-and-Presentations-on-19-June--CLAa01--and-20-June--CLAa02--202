@@ -6,14 +6,15 @@ date: "2025-06-03"
 
 # FUNCTIONS
 ```{r setup, include=FALSE}
-
+library(MASS)
+library(fmsb)
+library(pROC)
 library(dplyr)
 library(caret)
 library(glmnet)
 library(ggplot2)
 library(reshape2)
 library(pheatmap)
-library(MASS)
 library(randomForest)
 
 load_gene_subset <- function(group_number,
@@ -116,38 +117,6 @@ remove_correlated_features <- function(train_data, threshold = 0.8) {
   return(df_reduced)
 }
 
-
-compute_global_statistics <- function(train_genes, test_genes) {
-  # Column-wise means
-  train_means <- colMeans(train_genes)
-  test_means <- colMeans(test_genes)
-  
-  # Column-wise variances
-  train_vars <- apply(train_genes, 2, var)
-  test_vars  <- apply(test_genes, 2, var)
-  
-  # Global average mean and variance
-  overall_train_mean <- mean(train_means)
-  overall_test_mean  <- mean(test_means)
-  
-  overall_train_var <- mean(train_vars)
-  overall_test_var  <- mean(test_vars)
-  
-  # Print values
-  cat("Train Mean:", overall_train_mean, "\n")
-  cat("Test Mean:", overall_test_mean, "\n")
-  cat("Train Variance:", overall_train_var, "\n")
-  cat("Test Variance:", overall_test_var, "\n")
-  
-  # Return as data frame
-  return(data.frame(
-    Dataset = c("Train", "Test"),
-    Mean = c(overall_train_mean, overall_test_mean),
-    Variance = c(overall_train_var, overall_test_var)
-  ))
-}
-
-
 results <- data.frame(Iteration = integer(),
                       NumGenes = integer(),
                       FeatureSelection = logical(),
@@ -189,9 +158,6 @@ train_genes <- genes_only[train_index, ]
 test_genes <- genes_only[-train_index, ]
 train_labels <- labels[train_index]
 test_labels <- labels[-train_index]
-
-# Standardized Data
-global_stats <- compute_global_statistics(train_genes, test_genes)
 
 # ---------- Save Training and Test Data ----------
 # Combine gene expression and class label
@@ -319,6 +285,8 @@ shuffled_df <-  df[sample(nrow(df)),]
 genes_only <- shuffled_df[, setdiff(names(shuffled_df), "Class")]
 all_genes <- colnames(genes_only)
 
+
+
 # Create training 80% and test 20%, 
 train <- createDataPartition(shuffled_df$Class, p = 0.8, list = FALSE, times = 1)
 df_train <- shuffled_df[train,]
@@ -326,7 +294,6 @@ df_test <- shuffled_df[-train,]
 
 # 1. Random Forest model using repeated 10-fold cross-validation
 # With regression problems the default value is often  mtry = p3 and for classification mtry=√p
-
 num_features <- ncol(df_train) - 1
 sqrt_mtry <- floor(sqrt(num_features))
 
@@ -334,13 +301,14 @@ tunegrid_rf <- expand.grid(
   mtry = c(max(1, sqrt_mtry - 2), sqrt_mtry, sqrt_mtry + 2)
 )
 
+# TrainControl must include classProbs = TRUE
 ctrl <- trainControl(
   method = "cv",
   number = 10,
-  savePredictions = "final",  # Save predictions for each fold
-  classProbs = FALSE,
+  classProbs = TRUE,
+  savePredictions = "final",
+  summaryFunction = twoClassSummary
 )
-
 
 # Target variable is a factor
 df_train$Class <- as.factor(df_train$Class)
@@ -352,22 +320,67 @@ model_rf <- train(
   data = df_train,
   method = "rf",
   trControl = ctrl,
-  tuneGrid = tunegrid_rf,
-  ntree = 100  # number of trees
+  tuneGrid = expand.grid(mtry = floor(sqrt(ncol(df_train) - 1))),
+  ntree = 100,
+  metric = "ROC"
 )
 
-
-# Get overall accuracy from resampling results
-accuracy_values <- model_rf$resample$Accuracy
-
-# Calculate misclassification error per fold
-misclassification_errors <- 1 - accuracy_values
-
-cvrf_results <- data.frame(
-  Fold = 1:length(misclassification_errors),
-  Accuracy = accuracy_values,
-  MisclassificationError = misclassification_errors
+roc_obj <- pROC::roc(
+  response = model_rf$pred$obs,
+  predictor = model_rf$pred$X1,  # X1 is the class label "1" after make.names()
+  levels = rev(levels(model_rf$pred$obs))
 )
 
+auc_value <- auc(roc_obj)
+
+# Get predicted classes and true labels
+predictions <- model_rf$pred$pred
+true_labels <- model_rf$pred$obs
+
+# Confusion Matrix
+cm <- confusionMatrix(predictions, true_labels)
+
+
+# Metrics
+accuracy <- cm$overall["Accuracy"]
+sensitivity <- cm$byClass["Sensitivity"]
+specificity <- cm$byClass["Specificity"]
+ppv <- cm$byClass["Pos Pred Value"]
+npv <- cm$byClass["Neg Pred Value"]
+nfeats <- ncol(df_train) - 1 
+
+# Normalize Nfeats for plotting (0 to 1 scale)
+nfeats_norm <- nfeats / max(nfeats, 50)  # 50 is an arbitrary scale max
+
+metrics_df <- data.frame(
+  Accuracy = accuracy,
+  Sensitivity = sensitivity,
+  Specificity = specificity,
+  PPV = ppv,
+  NPV = npv,
+  AUC = auc_value,
+  Nfeats = nfeats_norm
+)
+
+# Add rows for max and min for scaling in radar plot
+metrics_plot <- rbind(
+  rep(1, 7),  # max values for scaling
+  rep(0, 7),  # min values
+  metrics_df
+)
+
+radarchart(metrics_plot,
+           axistype = 1,
+           pcol = "blue",         # line color
+           pfcol = rgb(0.2,0.5,0.5,0.3),  # fill color with transparency
+           plwd = 2,              # line width
+           cglcol = "grey",       # grid color
+           cglty = 1,
+           axislabcol = "black",
+           caxislabels = seq(0, 1, 0.2),
+           vlcex = 0.8)           # label size
+
+
+title("rfGA")
 
 ```

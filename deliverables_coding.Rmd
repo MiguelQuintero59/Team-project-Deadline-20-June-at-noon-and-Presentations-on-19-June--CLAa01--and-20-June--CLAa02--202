@@ -11,6 +11,7 @@ library(fmsb)
 library(pROC)
 library(dplyr)
 library(caret)
+library(scales) 
 library(glmnet)
 library(ggplot2)
 library(reshape2)
@@ -126,14 +127,16 @@ results <- data.frame(Iteration = integer(),
                       Genes = character(),
                       stringsAsFactors = FALSE)
 
-
 ```
+
 # The goal of feature selection is to highligth those features that have contribution performance towards the prediction variable. 
 # LDA Feature Selection
 ```{r setup, include=FALSE}
 
 set.seed(125) 
-# LDA Dimensionality Reduction and Model  -- VERSION 1
+# LDA Dimensionality Reduction and Model  -- VERSION 1 
+# Flow chart:LDA feature selection.jpeg
+
 # The approach using LDA for dimensionality reduction is: 
 # 1. Identify contribution performance using LDA to get features weights
 # 2. Standardized Data
@@ -144,9 +147,6 @@ set.seed(125)
 # Load Data
 df <- load_gene_subset(group_number = 7, include_class = TRUE)
 
-# Extract Predictors
-gene_data <- df[, setdiff(names(df), "Class")]
-
 # Separate predictors and class
 genes_only <- df[, setdiff(names(df), "Class")]
 labels <- df$Class
@@ -154,10 +154,14 @@ all_genes <- colnames(genes_only)
 
 # Create stratified train/test split
 train_index <- createDataPartition(labels, p = 0.8, list = FALSE)
+
 train_genes <- genes_only[train_index, ]
 test_genes <- genes_only[-train_index, ]
 train_labels <- labels[train_index]
 test_labels <- labels[-train_index]
+
+# Standardize training data
+train_genes <- scale(train_genes)
 
 # ---------- Save Training and Test Data ----------
 # Combine gene expression and class label
@@ -177,12 +181,8 @@ test_genes <- data$test_genes
 test_labels <- data$test_labels
 # ----------------------------------------------------
 
-# Standardize training data
-train_genes <- scale(train_genes)
-
 
 # === Random Search for Best Gene Subset ===
-
 n_iter <- 30  # number of random samples
 gene_range <- 10:60  # range of gene subset sizes to try
 results <- data.frame()
@@ -241,32 +241,41 @@ for (i in 1:n_iter) {
   }
 }
 
-# Sort by precision or another metric of your choice
-top_results <- results[order(-results$Precision_Train), ]
 
-top_results <- top_results[
-  top_results$Precision_Train != 1 &
-  top_results$Sensitivity_Train != 1 &
-  top_results$Specificity_Train != 1 &
-  top_results$Precision_Test != 1 &
-  top_results$Sensitivity_Test != 1 &
-  top_results$Specificity_Test != 1,
-]
-
-# Get the max values
-max_precision <- max(top_results$Precision_Test, na.rm = TRUE)
-max_sensitivity <- max(top_results$Sensitivity_Test, na.rm = TRUE)
-
-# Filter to rows that match BOTH max precision and max sensitivity
-best_results <- top_results[
-  top_results$Precision_Test == max_precision |
-  top_results$Sensitivity_Test == max_sensitivity,
-]
+# Analyzing the output from the random search
+# Getting rid of those models with higher overfitting
+best_results <- results %>%
+  filter(
+    Precision_Train != 1,
+    Sensitivity_Train != 1,
+    Specificity_Train != 1,
+    Precision_Test != 1,
+    Sensitivity_Test != 1,
+    Specificity_Test != 1
+  ) %>%
+  #Ordering by precision test results
+  arrange(desc(Precision_Test)) %>%
+  
+  #Filter by max precision and max sensitivity to control the trade off by the confusion matrix outputs
+  mutate(
+    max_precision = max(Precision_Test, na.rm = TRUE),
+    max_sensitivity = max(Sensitivity_Test, na.rm = TRUE)
+  ) %>%
+  
+  filter(
+    Precision_Test == max_precision |
+    Sensitivity_Test == max_sensitivity
+  ) %>%
+  
+  dplyr::select(-max_precision, -max_sensitivity)
 
 # Considering the classification metrics Precision, Recall and Specificity and the trade-off between them. The iteration 12th have the best trade-off
 # Precision: 0.7500000, Recall: 0.4285714, Specificity: 0.875, with a Total of 34 Genes as feature Selection. 
 # As recommendation we could evaluate the normality of the features and perform transformation techniques to achieve a higher result.
 
+
+
+# === Plotting LDA ======
 # Choose the best row (you can change this logic if needed)
 best_lda_row <- best_results[1, ]
 
@@ -304,7 +313,7 @@ auc_lda <- auc(roc_lda)
 # Number of features
 nfeats_lda <- length(selected_genes)
 
-
+# Consolidate results in metrics_lda table
 metrics_lda <- data.frame(
   Model = "LDA",
   Accuracy = as.numeric(accuracy_lda),
@@ -315,12 +324,13 @@ metrics_lda <- data.frame(
   AUC = as.numeric(auc_lda),
   Nfeats = as.numeric(nfeats_lda)
 )
-
 ```
 
 # Model:Random Forest  
 # Resample Techinque: K - Fold Cross Validation
 ```{r setup, include=FALSE}
+#The following code block is performing a Random forest (RF) using as resampling technique 10 fold cross validation. 
+
 set.seed(125) 
 
 # Load Data
@@ -332,7 +342,6 @@ shuffled_df <-  df[sample(nrow(df)),]
 # Separate predictors and class
 genes_only <- shuffled_df[, setdiff(names(shuffled_df), "Class")]
 all_genes <- colnames(genes_only)
-
 
 
 # Create training 80% and test 20%, 
@@ -352,6 +361,7 @@ tunegrid_rf <- expand.grid(
 # TrainControl must include classProbs = TRUE
 ctrl <- trainControl(
   method = "cv",
+  search = "grid",
   number = 10,
   classProbs = TRUE,
   savePredictions = "final",
@@ -388,7 +398,6 @@ true_labels <- model_rf$pred$obs
 # Confusion Matrix
 cm <- confusionMatrix(predictions, true_labels)
 
-
 # Metrics
 accuracy_rf <- cm$overall["Accuracy"]
 sensitivity_rf <- cm$byClass["Sensitivity"]
@@ -398,7 +407,7 @@ npv_rf <- cm$byClass["Neg Pred Value"]
 nfeats_rf <- ncol(df_train) - 1 
 
 # Normalize Nfeats for plotting (0 to 1 scale)
-nfeats_norm <- nfeats / max(nfeats, 50)  # 50 is an arbitrary scale max
+nfeats_norm <- nfeats_rf / max(nfeats_rf, 50)  # 50 is an arbitrary scale max
 
 metrics_rf <- data.frame(
   Model = "RF",
@@ -411,86 +420,68 @@ metrics_rf <- data.frame(
   Nfeats = as.numeric(nfeats_rf)
 )
 
-# Add rows for max and min for scaling in radar plot
-metrics_plot <- rbind(
-  rep(1, 7),  # max values for scaling
-  rep(0, 7),  # min values
-  metrics_df
-)
+```
 
-radarchart(metrics_plot,
-           axistype = 1,
-           pcol = "blue",         # line color
-           pfcol = rgb(0.2,0.5,0.5,0.3),  # fill color with transparency
-           plwd = 2,              # line width
-           cglcol = "grey",       # grid color
-           cglty = 1,
-           axislabcol = "black",
-           caxislabels = seq(0, 1, 0.2),
-           vlcex = 0.8)           # label size
+#Perform LDA using resampling technique 
+```{r setup, include=FALSE}
+
+```
 
 
-title("rfGA")
+```{r setup, include=FALSE}
+library(fmsb)      # For radar chart
+library(dplyr)     # For data manipulation
 
-library(fmsb)
 
-# Combine
+# === Setting Up Radar chart plot ===
 metrics_all <- rbind(metrics_rf, metrics_lda)
 
-#Normalize all numeric columns to [0, 1] scale for fair plotting
-normalize_df <- function(df) {
-  metric_names <- colnames(df)[-1]  # exclude 'Model' column
-  for (metric in metric_names) {
-    min_val <- min(df[[metric]], na.rm = TRUE)
-    max_val <- max(df[[metric]], na.rm = TRUE)
-    
-    if (min_val == max_val) {
-      df[[metric]] <- 0.5  # or 1 if you want to emphasize
-    } else {
-      df[[metric]] <- (df[[metric]] - min_val) / (max_val - min_val)
-    }
+#Normalize all numeric columns 
+normalize_column <- function(x) {
+  rng <- range(x, na.rm = TRUE)
+  if (diff(rng) == 0) {
+    return(rep(0.5, length(x)))  # Constant value case
+  } else {
+    return((x - min(x)) / (max(x) - min(x)))
   }
-  return(df)
 }
 
-metrics_all_scaled <- normalize_df(metrics_all)
+normalize_df <- metrics_all %>%
+  dplyr::select(-Model) %>%
+  dplyr::mutate(across(everything(), ~ normalize_column(.x)))
 
+radar_data <- rbind(
+  rep(1, ncol(normalize_df)),  # max values
+  rep(0, ncol(normalize_df)),  # min values
+  normalize_df
+)
 
-metrics_rf_scaled <- metrics_rf
-metrics_rf_scaled[,-1] <- as.data.frame(lapply(metrics_rf[,-1], normalize))
+rownames(radar_data) <- c("Max", "Min", df$Model)
 
-metrics_lda_scaled <- metrics_lda
-metrics_lda_scaled[,-1] <- as.data.frame(lapply(metrics_lda[,-1], normalize))
+# Plot
+colors_border <- c("blue", "red")
+colors_in <- adjustcolor(colors_border, alpha.f = 0.25)
 
-# Function to prepare data for radar chart (fmsb package requires max and min rows)
-prepare_radar_df <- function(df) {
-  df <- df[,-1]  # remove Model column
-  rbind(rep(1, ncol(df)), rep(0, ncol(df)), df)
-}
+radarchart(
+  radar_data,
+  pcol = colors_border,
+  pfcol = colors_in,
+  plwd = 2,
+  plty = 1,
+  cglcol = "lightgrey",
+  cglty = 1,
+  axislabcol = "lightgrey",
+  caxislabels = seq(0, 1, 0.2),
+  cglwd = 0.8,
+  vlcex = 0.8,
+  title = "Normalized Performance Comparison (RF vs LDA)"
+)
 
-rf_radar <- prepare_radar_df(metrics_rf_scaled)
-lda_radar <- prepare_radar_df(metrics_lda_scaled)
-
-# Plot settings
-radar_colors <- c("blue", "red")
-
-par(mfrow = c(1, 2))  # 1 row, 2 columns
-
-# RF Radar Plot
-radarchart(rf_radar,
-           axistype = 1,
-           pcol = radar_colors[1],
-           pfcol = scales::alpha(radar_colors[1], 0.4),
-           plwd = 2,
-           title = "Random Forest")
-
-# LDA Radar Plot
-radarchart(lda_radar,
-           axistype = 1,
-           pcol = radar_colors[2],
-           pfcol = scales::alpha(radar_colors[2], 0.4),
-           plwd = 2,
-           title = "LDA")
+legend(
+  x = "topright", legend = df$Model,
+  bty = "n", pch = 20, col = colors_border,
+  text.col = "grey40", cex = 0.9, pt.cex = 2
+)
 
 
 ```

@@ -6,6 +6,7 @@ date: "2025-06-03"
 
 # FUNCTIONS
 ```{r setup, include=FALSE}
+
 library(MASS)
 library(fmsb)
 library(pROC)
@@ -286,23 +287,17 @@ selected_genes <- unlist(strsplit(as.character(best_lda_row$Genes), ","))
 lda_test_df <- data.frame(test_genes[, selected_genes], Class = test_labels)
 lda_train_df <- data.frame(train_genes[, selected_genes], Class = train_labels)
 
+
 # Refit LDA model
 lda_model <- lda(Class ~ ., data = lda_train_df)
 lda_pred <- predict(lda_model, newdata = lda_test_df)
 
-# Confusion matrix
+# Confusion matrix Test DATA
 cm_lda <- confusionMatrix(
   data = as.factor(lda_pred$class),
   reference = as.factor(lda_test_df$Class),
   positive = "1"
 )
-
-# Extract metrics
-accuracy_lda <- cm_lda$overall["Accuracy"]
-sensitivity_lda <- cm_lda$byClass["Sensitivity"]
-specificity_lda <- cm_lda$byClass["Specificity"]
-ppv_lda <- cm_lda$byClass["Pos Pred Value"]
-npv_lda <- cm_lda$byClass["Neg Pred Value"]
 
 # AUC
 roc_lda <- pROC::roc(response = as.factor(lda_test_df$Class),
@@ -314,13 +309,14 @@ auc_lda <- auc(roc_lda)
 nfeats_lda <- length(selected_genes)
 
 # Consolidate results in metrics_lda table
-metrics_lda <- data.frame(
+metrics_lda_test <- data.frame(
   Model = "LDA",
-  Accuracy = as.numeric(accuracy_lda),
-  Sensitivity = as.numeric(sensitivity_lda),
-  Specificity = as.numeric(specificity_lda),
-  PPV = as.numeric(ppv_lda),
-  NPV = as.numeric(npv_lda),
+  Subset = 'Test',
+  Accuracy = as.numeric(cm_lda$overall["Accuracy"]),
+  Sensitivity = as.numeric(cm_lda$byClass["Sensitivity"]),
+  Specificity = as.numeric(cm_lda$byClass["Specificity"]),
+  PPV = as.numeric(cm_lda$byClass["Pos Pred Value"]),
+  NPV = as.numeric(cm_lda$byClass["Neg Pred Value"]),
   AUC = as.numeric(auc_lda),
   Nfeats = as.numeric(nfeats_lda)
 )
@@ -382,6 +378,7 @@ model_rf <- train(
   metric = "ROC"
 )
 
+# === Training Model Stats === 
 roc_obj <- pROC::roc(
   response = model_rf$pred$obs,
   predictor = model_rf$pred$X1,  # X1 is the class label "1" after make.names()
@@ -397,28 +394,49 @@ true_labels <- model_rf$pred$obs
 # Confusion Matrix
 cm <- confusionMatrix(predictions, true_labels)
 
-# Metrics
-accuracy_rf <- cm$overall["Accuracy"]
-sensitivity_rf <- cm$byClass["Sensitivity"]
-specificity_rf <- cm$byClass["Specificity"]
-ppv_rf <- cm$byClass["Pos Pred Value"]
-npv_rf <- cm$byClass["Neg Pred Value"]
-nfeats_rf <- ncol(df_train) - 1 
-
-# Normalize Nfeats for plotting (0 to 1 scale)
-nfeats_norm <- nfeats_rf / max(nfeats_rf, 50)  # 50 is an arbitrary scale max
-
-metrics_rf <- data.frame(
+metrics_rf_train <- data.frame(
   Model = "RF",
-  Accuracy = as.numeric(accuracy_rf),
-  Sensitivity = as.numeric(sensitivity_rf),
-  Specificity = as.numeric(specificity_rf),
-  PPV = as.numeric(ppv_rf),
-  NPV = as.numeric(npv_rf),
+  Subset = 'Train',
+  Accuracy = as.numeric(cm$overall["Accuracy"]),
+  Sensitivity = as.numeric(cm$byClass["Sensitivity"]),
+  Specificity = as.numeric(cm$byClass["Specificity"]),
+  PPV = as.numeric(cm$byClass["Pos Pred Value"]),
+  NPV = as.numeric(cm$byClass["Neg Pred Value"]),
   AUC = as.numeric(auc_value_rf),
-  Nfeats = as.numeric(nfeats_rf)
+  Nfeats = as.numeric(ncol(df_train) - 1 )
 )
 
+# === Test Model Stats ===
+prob_test <- predict(model_rf, newdata = df_test, type = "prob")
+pred_class_test <- predict(model_rf, newdata = df_test, type = "raw")
+
+df_test$Class <- make.names(df_test$Class)
+df_test$Class <- factor(df_test$Class, levels = levels(pred_class_test))
+
+cm_test <- confusionMatrix(
+  pred_class_test,
+  reference = as.factor(df_test$Class), 
+  positive = "X1"
+  )
+
+# AUC
+roc_test_rf <- pROC::roc(response = as.factor(df_test$Class),
+               predictor = prob_test$X1,
+               levels = rev(levels(as.factor(df_test$Class))))
+
+auc_value_rf_test <- auc(roc_test_rf)
+
+metrics_rf_test <- data.frame(
+  Model = "RF",
+  Subset = 'Test',
+  Accuracy = as.numeric(cm_test$overall["Accuracy"]),
+  Sensitivity = as.numeric(cm_test$byClass["Sensitivity"]),
+  Specificity = as.numeric(cm_test$byClass["Specificity"]),
+  PPV = as.numeric(cm_test$byClass["Pos Pred Value"]),
+  NPV = as.numeric(cm_test$byClass["Neg Pred Value"]),
+  AUC = as.numeric(auc_value_rf_test),
+  Nfeats = ncol(df_test) - 1
+)
 ```
 
 #Perform SVM using resampling technique 
@@ -481,9 +499,9 @@ model_sv <- train(
 
 
 roc_obj <- pROC::roc(
-  response = model_rf$pred$obs,
-  predictor = model_rf$pred$X1,  # X1 is the class label "1" after make.names()
-  levels = rev(levels(model_rf$pred$obs))
+  response = model_sv$pred$obs,
+  predictor = model_sv$pred$X1,  # X1 is the class label "1" after make.names()
+  levels = rev(levels(model_sv$pred$obs))
 )
 
 auc_value_svm <- auc(roc_obj)
@@ -495,27 +513,51 @@ true_labels <- model_sv$pred$obs
 # Confusion Matrix
 cm <- confusionMatrix(predictions, true_labels)
 
-# Metrics
-accuracy_svm <- cm$overall["Accuracy"]
-sensitivity_svm <- cm$byClass["Sensitivity"]
-specificity_svm <- cm$byClass["Specificity"]
-ppv_svm <- cm$byClass["Pos Pred Value"]
-npv_svm <- cm$byClass["Neg Pred Value"]
-nfeats_svm <- ncol(train_df) - 1 
-
-# Normalize Nfeats for plotting (0 to 1 scale)
-nfeats_norm <- nfeats_rf / max(nfeats_rf, 50)  # 50 is an arbitrary scale max
-
-metrics_svm <- data.frame(
+metrics_svm_train <- data.frame(
   Model = "SVM",
-  Accuracy = as.numeric(accuracy_svm),
-  Sensitivity = as.numeric(sensitivity_svm),
-  Specificity = as.numeric(specificity_svm),
-  PPV = as.numeric(ppv_svm),
-  NPV = as.numeric(npv_svm),
+  Subset = 'Train',
+  Accuracy = as.numeric(cm$overall["Accuracy"]),
+  Sensitivity = as.numeric(cm$byClass["Sensitivity"]),
+  Specificity = as.numeric(cm$byClass["Specificity"]),
+  PPV = as.numeric(cm$byClass["Pos Pred Value"]),
+  NPV = as.numeric(cm$byClass["Neg Pred Value"]),
   AUC = as.numeric(auc_value_svm),
-  Nfeats = as.numeric(nfeats_svm)
+  Nfeats = as.numeric(ncol(train_df) - 1)
 )
+
+
+# === Test Model Stats ===
+prob_test <- predict(model_sv, newdata = test_df, type = "prob")
+pred_class_test <- predict(model_sv, newdata = test_df, type = "raw")
+#pred_class_test <- factor(pred_class_test, levels = levels(test_df$Class))
+
+test_df$Class <- make.names(test_df$Class)
+test_df$Class <- factor(test_df$Class, levels = levels(pred_class_test))
+
+cm_test <- confusionMatrix(
+  pred_class_test,
+  reference = test_df$Class, 
+  positive = "X1"
+  )
+
+# AUC
+roc_svm <- pROC::roc(response = as.factor(test_df$Class),
+               predictor = prob_test$X1,
+               levels = rev(levels(as.factor(test_df$Class))))
+auc_value_svm <- auc(roc_svm)
+
+metrics_svm_test <- data.frame(
+  Model = "SVM",
+  Subset = 'Test',
+  Accuracy = as.numeric(cm_test$overall["Accuracy"]),
+  Sensitivity = as.numeric(cm_test$byClass["Sensitivity"]),
+  Specificity = as.numeric(cm_test$byClass["Specificity"]),
+  PPV = as.numeric(cm_test$byClass["Pos Pred Value"]),
+  NPV = as.numeric(cm_test$byClass["Neg Pred Value"]),
+  AUC = as.numeric(auc_value_svm),
+  Nfeats = as.numeric(ncol(df_test) - 1)
+)
+
 
 ```
 
@@ -523,7 +565,14 @@ metrics_svm <- data.frame(
 ```{r setup, include=FALSE}
 
 # === Setting Up Radar chart plot ===
-metrics_all <- rbind(metrics_rf, metrics_lda,metrics_svm)
+metrics_all <- rbind(metrics_lda_test,
+                     metrics_rf_train,
+                     metrics_rf_test,
+                     metrics_svm_train,
+                     metrics_svm_test)
+
+
+
 
 #Normalize all numeric columns 
 normalize_column <- function(x) {

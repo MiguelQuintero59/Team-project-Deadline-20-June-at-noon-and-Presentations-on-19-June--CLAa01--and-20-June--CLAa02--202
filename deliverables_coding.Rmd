@@ -267,6 +267,54 @@ best_results <- top_results[
 # Precision: 0.7500000, Recall: 0.4285714, Specificity: 0.875, with a Total of 34 Genes as feature Selection. 
 # As recommendation we could evaluate the normality of the features and perform transformation techniques to achieve a higher result.
 
+# Choose the best row (you can change this logic if needed)
+best_lda_row <- best_results[1, ]
+
+# Prepare data for prediction again
+selected_genes <- unlist(strsplit(as.character(best_lda_row$Genes), ","))
+
+# Ensure selected genes exist in test set
+lda_test_df <- data.frame(test_genes[, selected_genes], Class = test_labels)
+lda_train_df <- data.frame(train_genes[, selected_genes], Class = train_labels)
+
+# Refit LDA model
+lda_model <- lda(Class ~ ., data = lda_train_df)
+lda_pred <- predict(lda_model, newdata = lda_test_df)
+
+# Confusion matrix
+cm_lda <- confusionMatrix(
+  data = as.factor(lda_pred$class),
+  reference = as.factor(lda_test_df$Class),
+  positive = "1"
+)
+
+# Extract metrics
+accuracy_lda <- cm_lda$overall["Accuracy"]
+sensitivity_lda <- cm_lda$byClass["Sensitivity"]
+specificity_lda <- cm_lda$byClass["Specificity"]
+ppv_lda <- cm_lda$byClass["Pos Pred Value"]
+npv_lda <- cm_lda$byClass["Neg Pred Value"]
+
+# AUC
+roc_lda <- pROC::roc(response = as.factor(lda_test_df$Class),
+               predictor = lda_pred$posterior[, "1"],
+               levels = rev(levels(as.factor(lda_test_df$Class))))
+auc_lda <- auc(roc_lda)
+
+# Number of features
+nfeats_lda <- length(selected_genes)
+
+
+metrics_lda <- data.frame(
+  Model = "LDA",
+  Accuracy = as.numeric(accuracy_lda),
+  Sensitivity = as.numeric(sensitivity_lda),
+  Specificity = as.numeric(specificity_lda),
+  PPV = as.numeric(ppv_lda),
+  NPV = as.numeric(npv_lda),
+  AUC = as.numeric(auc_lda),
+  Nfeats = as.numeric(nfeats_lda)
+)
 
 ```
 
@@ -331,7 +379,7 @@ roc_obj <- pROC::roc(
   levels = rev(levels(model_rf$pred$obs))
 )
 
-auc_value <- auc(roc_obj)
+auc_value_rf <- auc(roc_obj)
 
 # Get predicted classes and true labels
 predictions <- model_rf$pred$pred
@@ -342,24 +390,25 @@ cm <- confusionMatrix(predictions, true_labels)
 
 
 # Metrics
-accuracy <- cm$overall["Accuracy"]
-sensitivity <- cm$byClass["Sensitivity"]
-specificity <- cm$byClass["Specificity"]
-ppv <- cm$byClass["Pos Pred Value"]
-npv <- cm$byClass["Neg Pred Value"]
-nfeats <- ncol(df_train) - 1 
+accuracy_rf <- cm$overall["Accuracy"]
+sensitivity_rf <- cm$byClass["Sensitivity"]
+specificity_rf <- cm$byClass["Specificity"]
+ppv_rf <- cm$byClass["Pos Pred Value"]
+npv_rf <- cm$byClass["Neg Pred Value"]
+nfeats_rf <- ncol(df_train) - 1 
 
 # Normalize Nfeats for plotting (0 to 1 scale)
 nfeats_norm <- nfeats / max(nfeats, 50)  # 50 is an arbitrary scale max
 
-metrics_df <- data.frame(
-  Accuracy = accuracy,
-  Sensitivity = sensitivity,
-  Specificity = specificity,
-  PPV = ppv,
-  NPV = npv,
-  AUC = auc_value,
-  Nfeats = nfeats_norm
+metrics_rf <- data.frame(
+  Model = "RF",
+  Accuracy = as.numeric(accuracy_rf),
+  Sensitivity = as.numeric(sensitivity_rf),
+  Specificity = as.numeric(specificity_rf),
+  PPV = as.numeric(ppv_rf),
+  NPV = as.numeric(npv_rf),
+  AUC = as.numeric(auc_value_rf),
+  Nfeats = as.numeric(nfeats_rf)
 )
 
 # Add rows for max and min for scaling in radar plot
@@ -382,5 +431,66 @@ radarchart(metrics_plot,
 
 
 title("rfGA")
+
+library(fmsb)
+
+# Combine
+metrics_all <- rbind(metrics_rf, metrics_lda)
+
+#Normalize all numeric columns to [0, 1] scale for fair plotting
+normalize_df <- function(df) {
+  metric_names <- colnames(df)[-1]  # exclude 'Model' column
+  for (metric in metric_names) {
+    min_val <- min(df[[metric]], na.rm = TRUE)
+    max_val <- max(df[[metric]], na.rm = TRUE)
+    
+    if (min_val == max_val) {
+      df[[metric]] <- 0.5  # or 1 if you want to emphasize
+    } else {
+      df[[metric]] <- (df[[metric]] - min_val) / (max_val - min_val)
+    }
+  }
+  return(df)
+}
+
+metrics_all_scaled <- normalize_df(metrics_all)
+
+
+metrics_rf_scaled <- metrics_rf
+metrics_rf_scaled[,-1] <- as.data.frame(lapply(metrics_rf[,-1], normalize))
+
+metrics_lda_scaled <- metrics_lda
+metrics_lda_scaled[,-1] <- as.data.frame(lapply(metrics_lda[,-1], normalize))
+
+# Function to prepare data for radar chart (fmsb package requires max and min rows)
+prepare_radar_df <- function(df) {
+  df <- df[,-1]  # remove Model column
+  rbind(rep(1, ncol(df)), rep(0, ncol(df)), df)
+}
+
+rf_radar <- prepare_radar_df(metrics_rf_scaled)
+lda_radar <- prepare_radar_df(metrics_lda_scaled)
+
+# Plot settings
+radar_colors <- c("blue", "red")
+
+par(mfrow = c(1, 2))  # 1 row, 2 columns
+
+# RF Radar Plot
+radarchart(rf_radar,
+           axistype = 1,
+           pcol = radar_colors[1],
+           pfcol = scales::alpha(radar_colors[1], 0.4),
+           plwd = 2,
+           title = "Random Forest")
+
+# LDA Radar Plot
+radarchart(lda_radar,
+           axistype = 1,
+           pcol = radar_colors[2],
+           pfcol = scales::alpha(radar_colors[2], 0.4),
+           plwd = 2,
+           title = "LDA")
+
 
 ```

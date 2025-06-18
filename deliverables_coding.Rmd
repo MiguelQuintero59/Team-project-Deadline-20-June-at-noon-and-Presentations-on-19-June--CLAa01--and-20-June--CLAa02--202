@@ -561,6 +561,7 @@ metrics_svm_test <- data.frame(
 
 ```
 
+
 # PLOTING RESULTS
 ```{r setup, include=FALSE}
 
@@ -570,118 +571,5 @@ metrics_all <- rbind(metrics_lda_test,
                      metrics_rf_test,
                      metrics_svm_train,
                      metrics_svm_test)
-
-
-
-
-#Normalize all numeric columns 
-normalize_column <- function(x) {
-  rng <- range(x, na.rm = TRUE)
-  if (diff(rng) == 0) {
-    return(rep(0.5, length(x)))  # Constant value case
-  } else {
-    return((x - min(x)) / (max(x) - min(x)))
-  }
-}
-
-normalize_df <- metrics_all %>%
-  dplyr::select(-Model) %>%
-  dplyr::mutate(across(everything(), ~ normalize_column(.x)))
-
-radar_data <- rbind(
-  rep(1, ncol(normalize_df)),  # max values
-  rep(0, ncol(normalize_df)),  # min values
-  normalize_df
-)
-
-rownames(radar_data) <- c("Max", "Min", metrics_all$Model)
-
-# Plot
-colors_border <- c("blue", "red")
-colors_in <- adjustcolor(colors_border, alpha.f = 0.25)
-
-radarchart(
-  radar_data,
-  pcol = colors_border,
-  pfcol = colors_in,
-  plwd = 2,
-  plty = 1,
-  cglcol = "lightgrey",
-  cglty = 1,
-  axislabcol = "lightgrey",
-  caxislabels = seq(0, 1, 0.2),
-  cglwd = 0.8,
-  vlcex = 0.8,
-  title = "Normalized Performance Comparison (RF vs LDA)"
-)
-
-legend(
-  x = "topright", legend = metrics_all$Model,
-  bty = "n", pch = 20, col = colors_border,
-  text.col = "grey40", cex = 0.9, pt.cex = 2
-)
-
-library(fmsb)      # For radar chart
-library(dplyr)     # For data manipulation
-
-# Combine all metrics into a single data frame
-metrics_all <- rbind(metrics_rf, metrics_lda, metrics_svm)
-
-# Normalize function: handles constant columns gracefully
-normalize_column <- function(x) {
-  rng <- range(x, na.rm = TRUE)
-  if (diff(rng) == 0) {
-    return(rep(0.5, length(x)))  # If constant, return 0.5
-  } else {
-    return((x - min(x)) / diff(rng))  # Normalize to 0-1
-  }
-}
-
-# Apply normalization (excluding 'Model')
-metrics_normalized <- metrics_all %>%
-  mutate(across(where(is.numeric) & !all_of("Model"), normalize_column))
-
-# === Plot Each Model Individually ===
-# Define colors
-colors_border <- c("blue", "red", "darkgreen")
-colors_in <- adjustcolor(colors_border, alpha.f = 0.3)
-
-# Set layout: one plot per model
-par(mfrow = c(1, 3), mar = c(2, 2, 2, 2))
-
-for (i in 1:nrow(metrics_normalized)) {
-  model_name <- metrics_normalized$Model[i]
-  values <- metrics_normalized[i, -which(names(metrics_normalized) == "Model")]
-
-  # Prepare radar chart data
-  radar_data <- rbind(
-    rep(1, length(values)),  # max line
-    rep(0, length(values)),  # min line
-    as.numeric(values)
-  )
-
-  rownames(radar_data) <- c("Max", "Min", model_name)
-  colnames(radar_data) <- names(values)
-
-  radarchart(
-    radar_data,
-    axistype = 1,
-    pcol = colors_border[i],
-    pfcol = colors_in[i],
-    plwd = 2,
-    plty = 1,
-    cglcol = "lightgrey",
-    cglty = 1,
-    axislabcol = "lightgrey",
-    caxislabels = seq(0, 1, 0.2),
-    cglwd = 0.8,
-    vlcex = 0.9,
-    title = model_name
-  )
-}
-
-# Reset layout
-par(mfrow = c(1, 1))
-
 
 ```

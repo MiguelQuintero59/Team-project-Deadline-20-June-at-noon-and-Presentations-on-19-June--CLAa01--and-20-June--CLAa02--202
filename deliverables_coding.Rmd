@@ -555,7 +555,7 @@ metrics_svm_test <- data.frame(
   PPV = as.numeric(cm_test$byClass["Pos Pred Value"]),
   NPV = as.numeric(cm_test$byClass["Neg Pred Value"]),
   AUC = as.numeric(auc_value_svm),
-  Nfeats = as.numeric(ncol(df_test) - 1)
+  Nfeats = as.numeric(ncol(test_df) - 1)
 )
 
 

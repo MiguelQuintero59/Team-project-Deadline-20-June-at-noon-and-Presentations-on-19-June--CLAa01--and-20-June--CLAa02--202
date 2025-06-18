@@ -149,20 +149,28 @@ set.seed(125)
 df <- load_gene_subset(group_number = 7, include_class = TRUE)
 
 # Separate predictors and class
-genes_only <- df[, setdiff(names(df), "Class")]
-labels <- df$Class
+df_features <- df[, setdiff(names(df), "Class")]
+df_class <- df$Class
+
+# Standardize predictors
+df_features_scaled <- scale(df_features)
+
+# Combine Dataframe
+df_scaled <- as.data.frame(df_features_scaled)
+df_scaled$Class <- make.names(df_class)
+
+
+# Separate predictors and class
+genes_only <- df_scaled[, setdiff(names(df_scaled), "Class")]
+labels <- df_scaled$Class
 all_genes <- colnames(genes_only)
 
 # Create stratified train/test split
 train_index <- createDataPartition(labels, p = 0.8, list = FALSE)
-
 train_genes <- genes_only[train_index, ]
 test_genes <- genes_only[-train_index, ]
 train_labels <- labels[train_index]
 test_labels <- labels[-train_index]
-
-# Standardize training data
-train_genes <- scale(train_genes)
 
 # ---------- Save Training and Test Data ----------
 # Combine gene expression and class label
@@ -196,8 +204,6 @@ for (i in 1:n_iter) {
   train_df <- data.frame(train_genes[, selected_genes], Class = train_labels)
   test_df <- data.frame(test_genes, Class = test_labels)
   
-  # Compute correlation matrix to avoid collinearity
-  train_df <- remove_correlated_features(train_df)
   
   # Fit LDA model
   lda_model <- tryCatch({
@@ -207,11 +213,11 @@ for (i in 1:n_iter) {
   if (!is.null(lda_model)) {
     # Predict on test set
     test_pred <- predict(lda_model, newdata = test_df)
-    cm_test <- confusionMatrix(as.factor(test_pred$class), as.factor(test_df$Class), positive = "1")
+    cm_test <- confusionMatrix(as.factor(test_pred$class), as.factor(test_df$Class), positive = "X1")
     
     # Predict on training set
     train_pred <- predict(lda_model, newdata = train_df)
-    cm_train <- confusionMatrix(as.factor(train_pred$class), as.factor(train_df$Class), positive = "1")
+    cm_train <- confusionMatrix(as.factor(train_pred$class), as.factor(train_df$Class), positive = "X1")
     
     # Extract metrics
     precision_test <- cm_test$byClass["Pos Pred Value"]
@@ -275,19 +281,31 @@ best_results <- results %>%
 # As recommendation we could evaluate the normality of the features and perform transformation techniques to achieve a higher result.
 
 
-
 # === Plotting LDA ======
-# Choose the best row (you can change this logic if needed)
+# Choose the best row
 best_lda_row <- best_results[1, ]
-
-# Prepare data for prediction again
 selected_genes <- unlist(strsplit(as.character(best_lda_row$Genes), ","))
 
-# Ensure selected genes exist in test set
-lda_test_df <- data.frame(test_genes[, selected_genes], Class = test_labels)
-lda_train_df <- data.frame(train_genes[, selected_genes], Class = train_labels)
+# Combine train and test before scaling
+combined_df <- rbind(
+  data.frame(train_genes[, selected_genes], Class = train_labels, Set = "Train"),
+  data.frame(test_genes[, selected_genes], Class = test_labels, Set = "Test")
+)
+
+#Scale predictors
+scaled_predictors <- scale(combined_df[, selected_genes])
+
+# Reattach class and set labels
+combined_scaled_df <- data.frame(scaled_predictors,
+                                 Class = combined_df$Class,
+                                 Set = combined_df$Set)
+
+# Split back into train and test
+lda_train_df <- subset(combined_scaled_df, Set == "Train")
+lda_test_df <- subset(combined_scaled_df, Set == "Test")
 
 
+# === Test Model Stats ===
 # Refit LDA model
 lda_model <- lda(Class ~ ., data = lda_train_df)
 lda_pred <- predict(lda_model, newdata = lda_test_df)
@@ -338,7 +356,6 @@ shuffled_df <-  df[sample(nrow(df)),]
 genes_only <- shuffled_df[, setdiff(names(shuffled_df), "Class")]
 all_genes <- colnames(genes_only)
 
-
 # Create training 80% and test 20%, 
 train <- createDataPartition(shuffled_df$Class, p = 0.8, list = FALSE, times = 1)
 df_train <- shuffled_df[train,]
@@ -373,6 +390,7 @@ model_rf <- train(
   data = df_train,
   method = "rf",
   trControl = ctrl,
+  preProcess = c("center", "scale"),
   tuneGrid = expand.grid(mtry = floor(sqrt(ncol(df_train) - 1))),
   ntree = 100,
   metric = "ROC"
@@ -465,9 +483,6 @@ test_genes <- genes_only[-train_index, ]
 train_labels <- labels[train_index]
 test_labels <- labels[-train_index]
 
-# Standardize training data
-train_genes <- scale(train_genes)
-
 #Combine dataframes
 train_df <- data.frame(train_genes, Class = train_labels)
 test_df <- data.frame(test_genes, Class = test_labels)
@@ -492,11 +507,11 @@ model_sv <- train(
   data = train_df,
   method = "svmRadial",
   trControl = ctrl_svm,
+  preProcess = c("center", "scale"),
   ntree = 100,
   tuneLength = 10,
   metric = "ROC"
 )
-
 
 roc_obj <- pROC::roc(
   response = model_sv$pred$obs,
@@ -562,14 +577,109 @@ metrics_svm_test <- data.frame(
 ```
 
 
+#QDA Model
+```{r setup, include=FALSE}
+
+set.seed(125) 
+# Load Data filter using feature selection from first point 
+df <- load_gene_subset(group_number = 7, include_class = TRUE)
+selected_genes <- unlist(strsplit(best_results$Genes[1], split = ","))
+selected_genes <- trimws(selected_genes)
+
+#Make sure to filter contributing genes and class label in the df_filtered
+df_filtered <- df[, selected_genes, drop = FALSE]
+df_filtered <- df[, c(selected_genes, "Class")]
+
+# Separate predictors and class
+genes_only <- df_filtered[, setdiff(names(df_filtered), "Class")]
+labels <- df_filtered$Class
+all_genes <- colnames(genes_only)
+
+# Create training 80% and test 20%, 
+train <- createDataPartition(df_filtered$Class, p = 0.8, list = FALSE, times = 1)
+df_train <- df_filtered[train,]
+df_test <- df_filtered[-train,]
+
+# Remove near-zero variance predictors
+nzv <- nearZeroVar(df_train, saveMetrics = TRUE)
+df_train <- df_train[, !nzv$nzv]
+
+# Remove highly correlated predictors
+df_train <- remove_correlated_features(df_train, threshold = 0.8)
+
+# Convert Class to factor and apply make.names
+df_train$Class <- as.factor(make.names(df_train$Class))
+df_test$Class <- as.factor(make.names(df_test$Class))
+
+
+
+cor_matrix <- cor(df_train[, sapply(df_train, is.numeric)])
+high_corr <- findCorrelation(cor_matrix, cutoff = 0.9)
+df_train <- df_train[, -high_corr]
+
+# Train control setup
+ctrl <- trainControl(
+  method = "cv",
+  number = 10,
+  classProbs = TRUE,
+  summaryFunction = twoClassSummary,
+  savePredictions = "final"
+)
+
+# Training QDA model
+model_qda <- train(
+  Class ~ .,
+  data = df_train,
+  method = "qda",
+  trControl = ctrl,
+  preProcess = c("center", "scale"),
+  metric = "ROC"
+)
+
+
+
+# === Training Model Stats === 
+roc_obj <- pROC::roc(
+  response = model_qda$pred$obs,
+  predictor = model_qda$pred$X1,  # X1 is the class label "1" after make.names()
+  levels = rev(levels(model_qda$pred$obs))
+)
+
+auc_value_qda <- auc(roc_obj)
+
+# Get predicted classes and true labels
+predictions <- model_qda$pred$pred
+true_labels <- model_qda$pred$obs
+
+# Confusion Matrix
+cm_qda <- confusionMatrix(predictions, true_labels)
+
+metrics_qda_train <- data.frame(
+  Model = "RF",
+  Subset = 'Train',
+  Accuracy = as.numeric(cm_qda$overall["Accuracy"]),
+  Sensitivity = as.numeric(cm_qda$byClass["Sensitivity"]),
+  Specificity = as.numeric(cm_qda$byClass["Specificity"]),
+  PPV = as.numeric(cm_qda$byClass["Pos Pred Value"]),
+  NPV = as.numeric(cm_qda$byClass["Neg Pred Value"]),
+  AUC = as.numeric(auc_value_qda),
+  Nfeats = as.numeric(ncol(df_train) - 1 )
+)
+```
+
+
 # PLOTING RESULTS
 ```{r setup, include=FALSE}
 
 # === Setting Up Radar chart plot ===
+
 metrics_all <- rbind(metrics_lda_test,
-                     metrics_rf_train,
-                     metrics_rf_test,
-                     metrics_svm_train,
-                     metrics_svm_test)
+                     metrics_rf_train,metrics_rf_test,
+                     metrics_svm_train,metrics_svm_test)
+
+metrics_all <- rbind(metrics_lda_test,
+                     metrics_rf_train,metrics_rf_test,
+                     metrics_svm_train,metrics_svm_test,
+                     metrics_qda_train)
 
 ```

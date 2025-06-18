@@ -1,0 +1,163 @@
+---
+title: "modified_code_project"
+output: html_document
+date: "2025-06-18"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r setup, include=FALSE}
+# === Load libraries ===
+library(MASS)        # for lda()
+library(dplyr)       # data wrangling
+library(caret)       # preprocessing, partitioning, metrics
+library(pROC)        # ROC/AUC
+
+# === Utility: remove correlated features on train, apply to test ===
+remove_correlated_features <- function(train_df, test_df = NULL, cutoff = 0.8) {
+  # Compute correlation matrix on training data only
+  cor_mat   <- cor(train_df, use = "pairwise.complete.obs")
+  drop_idx  <- findCorrelation(cor_mat, cutoff = cutoff)
+  keep_vars <- colnames(train_df)[-drop_idx]
+  
+  train_reduced <- train_df[, keep_vars, drop = FALSE]
+  
+  if (!is.null(test_df)) {
+    test_reduced <- test_df[, keep_vars, drop = FALSE]
+    return(list(train = train_reduced, test = test_reduced))
+  } else {
+    return(train_reduced)
+  }
+}
+
+# === 1. Load the Team‐7 subset ===
+df          <- load_gene_subset(group_number = 7, include_class = TRUE)
+genes_only  <- df %>% select(-Class)
+labels      <- df$Class
+
+# === 2. Stratified train/test split ===
+set.seed(125)
+train_idx    <- createDataPartition(labels, p = 0.8, list = FALSE)
+train_genes  <- genes_only[train_idx, , drop = FALSE]
+train_labels <- labels[train_idx]
+test_genes   <- genes_only[-train_idx, , drop = FALSE]
+test_labels  <- labels[-train_idx]
+
+# === 3. Pre‐processing: center & scale ===
+preproc       <- preProcess(train_genes, method = c("center", "scale"))
+train_scaled  <- predict(preproc, train_genes)
+test_scaled   <- predict(preproc, test_genes)
+
+# === 4. Remove highly correlated features (global filter) ===
+rc            <- remove_correlated_features(train_scaled, test_scaled, cutoff = 0.8)
+train_filtered <- rc$train
+test_filtered  <- rc$test
+
+all_genes     <- colnames(train_filtered)
+
+# === 5. Random‐search LDA feature‐selection ===
+set.seed(125)
+n_iter    <- 30
+gene_range <- 10:60
+
+# Prepare results container
+results <- tibble::tibble(
+  Iteration        = integer(),
+  NumGenes         = integer(),
+  Precision_Train  = double(),
+  Sensitivity_Train= double(),
+  Specificity_Train= double(),
+  Precision_Test   = double(),
+  Sensitivity_Test = double(),
+  Specificity_Test = double(),
+  Genes            = character()
+)
+
+for (i in seq_len(n_iter)) {
+  # 5.1 sample a subset of genes
+  k_genes  <- sample(gene_range, 1)
+  subset   <- sample(all_genes, k_genes)
+  
+  train_sub <- train_filtered[, subset, drop = FALSE]
+  test_sub  <- test_filtered[, subset, drop = FALSE]
+  
+  # 5.2 fit LDA with equal priors
+  lda_fit <- tryCatch(
+    lda(x = train_sub,
+        grouping = train_labels,
+        prior = rep(1/length(unique(labels)), length(unique(labels)))
+    ),
+    error = function(e) NULL
+  )
+  if (is.null(lda_fit)) next
+  
+  # 5.3 predict & evaluate
+  pred_tr <- predict(lda_fit, train_sub)$class
+  pred_te <- predict(lda_fit, test_sub)$class
+  
+  cm_tr <- confusionMatrix(as.factor(pred_tr), as.factor(train_labels), positive = "2")
+  cm_te <- confusionMatrix(as.factor(pred_te), as.factor(test_labels),  positive = "2")
+  
+  # 5.4 record metrics
+  results <- results %>% add_row(
+    Iteration         = i,
+    NumGenes          = k_genes,
+    Precision_Train   = cm_tr$byClass["Pos Pred Value"],
+    Sensitivity_Train = cm_tr$byClass["Sensitivity"],
+    Specificity_Train = cm_tr$byClass["Specificity"],
+    Precision_Test    = cm_te$byClass["Pos Pred Value"],
+    Sensitivity_Test  = cm_te$byClass["Sensitivity"],
+    Specificity_Test  = cm_te$byClass["Specificity"],
+    Genes             = paste(subset, collapse = ",")
+  )
+}
+
+# === 6. Clean & select best subset ===
+results_clean <- results %>%
+  filter(!is.na(Precision_Test)) %>%                # drop failed fits
+  filter(across(starts_with("Precision"), ~ . < 1)) # optional: remove perfect‐score artifacts
+
+# pick the run with highest test Precision (tie‐broken by Sensitivity)
+best_row <- results_clean %>%
+  arrange(desc(Precision_Test), desc(Sensitivity_Test)) %>%
+  slice(1)
+
+# === 7. Refit & final evaluation on best subset ===
+best_genes <- strsplit(best_row$Genes, ",")[[1]]
+final_tr   <- train_filtered[, best_genes, drop = FALSE]
+final_te   <- test_filtered[,  best_genes, drop = FALSE]
+
+final_lda  <- lda(final_tr, grouping = train_labels, prior = c(.5, .5))
+pred_final <- predict(final_lda, final_te)$class
+cm_final   <- confusionMatrix(as.factor(pred_final), as.factor(test_labels), positive = "2")
+
+# Summarize final performance
+final_metrics <- tibble::tibble(
+  Accuracy    = cm_final$overall["Accuracy"],
+  Sensitivity = cm_final$byClass["Sensitivity"],
+  Specificity = cm_final$byClass["Specificity"],
+  Precision   = cm_final$byClass["Pos Pred Value"],
+  AUC         = roc(test_labels, predict(final_lda, final_te)$posterior[, "2"])$auc,
+  N_Features  = length(best_genes)
+)
+
+print(final_metrics)
+```
+
+## Including Plots
+
+You can also embed plots, for example:
+
+```{r pressure, echo=FALSE}
+plot(pressure)
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.

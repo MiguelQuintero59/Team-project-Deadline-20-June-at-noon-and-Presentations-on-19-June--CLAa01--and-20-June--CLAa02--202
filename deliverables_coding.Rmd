@@ -96,37 +96,21 @@ read_gene_data <- function(train_path = "data/train_data.csv", test_path = "data
 }
 
 
-remove_correlated_features <- function(train_data, threshold = 0.8) {
-  # Compute correlation matrix
-  cor_matrix <- cor(train_data, method = "pearson", use = "pairwise.complete.obs")
-  cor_df <- as.data.frame(as.table(cor_matrix))
+remove_correlated_features <- function(train_df, test_df = NULL, cutoff = 0.8) {
+  # Compute correlation matrix on training data only
+  cor_mat   <- cor(train_df, use = "pairwise.complete.obs")
+  drop_idx  <- findCorrelation(cor_mat, cutoff = cutoff)
+  keep_vars <- colnames(train_df)[-drop_idx]
   
-  # Remove self-correlations
-  cor_df <- cor_df[cor_df$Var1 != cor_df$Var2, ]
+  train_reduced <- train_df[, keep_vars, drop = FALSE]
   
-  # Remove duplicate pairs (symmetry in correlation matrix)
-  cor_df <- cor_df[!duplicated(t(apply(cor_df[, 1:2], 1, sort))), ]
-  
-  # Filter for highly correlated pairs
-  high_cor_df <- cor_df[abs(cor_df$Freq) > threshold, ]
-  
-  # Keep only one variable from each correlated pair
-  genes_to_remove <- unique(high_cor_df$Var2)
-  
-  # Remove redundant features
-  df_reduced <- train_data[, !(colnames(train_data) %in% genes_to_remove)]
-  
-  return(df_reduced)
+  if (!is.null(test_df)) {
+    test_reduced <- test_df[, keep_vars, drop = FALSE]
+    return(list(train = train_reduced, test = test_reduced))
+  } else {
+    return(train_reduced)
+  }
 }
-
-results <- data.frame(Iteration = integer(),
-                      NumGenes = integer(),
-                      FeatureSelection = logical(),
-                      Precision = double(),
-                      Sensitivity = double(),
-                      Specificity = double(),
-                      Genes = character(),
-                      stringsAsFactors = FALSE)
 
 ```
 
@@ -195,6 +179,8 @@ test_labels <- data$test_labels
 n_iter <- 30  # number of random samples
 gene_range <- 10:60  # range of gene subset sizes to try
 results <- data.frame()
+weights_results <- data.frame()
+
 
 for (i in 1:n_iter) {
   num_genes <- sample(gene_range, 1)
@@ -210,44 +196,68 @@ for (i in 1:n_iter) {
     lda(Class ~ ., data = train_df)
   }, error = function(e) return(NULL))
   
+  feature_weights <- lda_model$scaling[selected_genes, , drop = FALSE]
+  Weights = paste(paste(rownames(feature_weights), round(feature_weights[, 1], 5), sep = ":"), collapse = ";")
+
+  
   if (!is.null(lda_model)) {
     # Predict on test set
     test_pred <- predict(lda_model, newdata = test_df)
     cm_test <- confusionMatrix(as.factor(test_pred$class), as.factor(test_df$Class), positive = "X1")
+
+    # Predict again on full test_genes for AUC calculation
+    test_pred_for_auc <- predict(lda_model, newdata = test_genes[, selected_genes])
     
+    roc_lda_test <- pROC::roc(response = as.factor(test_labels),
+                   predictor = test_pred_for_auc$posterior[, "X1"],
+                   levels = rev(levels(as.factor(test_labels))))
+    auc_lda_test <- auc(roc_lda_test)
+  
     # Predict on training set
     train_pred <- predict(lda_model, newdata = train_df)
     cm_train <- confusionMatrix(as.factor(train_pred$class), as.factor(train_df$Class), positive = "X1")
     
-    # Extract metrics
-    precision_test <- cm_test$byClass["Pos Pred Value"]
-    sensitivity_test <- cm_test$byClass["Sensitivity"]
-    specificity_test <- cm_test$byClass["Specificity"]
+    roc_lda_train <- pROC::roc(response = as.factor(train_df$Class),
+                           predictor = train_pred$posterior[, "X1"],
+                           levels = rev(levels(as.factor(train_df$Class))))
+    auc_lda_train <- auc(roc_lda_train)
     
-    precision_train <- cm_train$byClass["Pos Pred Value"]
-    sensitivity_train <- cm_train$byClass["Sensitivity"]
-    specificity_train <- cm_train$byClass["Specificity"]
+    
+  
     
     # Append to results
+    # Append to results
+    weights_results <- rbind(weights_results, data.frame(Weights = paste(paste(rownames(feature_weights), round(feature_weights[, 1], 5), sep = ":"), collapse = ";")))
+    
     results <- rbind(results, data.frame(
       Iteration = i,
       NumGenes = num_genes,
       FeatureSelection = TRUE,
       
-      Precision_Train = precision_train,
-      Sensitivity_Train = sensitivity_train,
-      Specificity_Train = specificity_train,
+      AccuracyTrain = as.numeric(cm_train$overall["Accuracy"]), 
+      Precision_Train = as.numeric(cm_train$byClass["Pos Pred Value"]),
+      Sensitivity_Train = as.numeric(cm_train$byClass["Sensitivity"]),
+      Specificity_Train = as.numeric(cm_train$byClass["Specificity"]),
+      PPV_Train = as.numeric(cm_train$byClass["Pos Pred Value"]),
+      NPV_Train = as.numeric(cm_train$byClass["Neg Pred Value"]),
+      AUC_Train = as.numeric(auc_lda_train),
       
-      Precision_Test = precision_test,
-      Sensitivity_Test = sensitivity_test,
-      Specificity_Test = specificity_test,
+      Accuracy_Test = as.numeric(cm_test$overall["Accuracy"]),
+      Precision_Test = as.numeric(cm_test$byClass["Pos Pred Value"]),
+      Sensitivity_Test = as.numeric(cm_test$byClass["Sensitivity"]),
+      Specificity_Test = as.numeric(cm_test$byClass["Specificity"]),
+      PPV = as.numeric(cm_test$byClass["Pos Pred Value"]),
+      NPV = as.numeric(cm_test$byClass["Neg Pred Value"]),
+      AUC_Test = as.numeric(auc_lda_test),
       
       Genes = paste(selected_genes, collapse = ",")
-    )
-    )
+
+    ))
+    
+    
+    
   }
 }
-
 
 # Analyzing the output from the random search
 # Getting rid of those models with higher overfitting
@@ -276,68 +286,49 @@ best_results <- results %>%
   
   dplyr::select(-max_precision, -max_sensitivity)
 
-# Considering the classification metrics Precision, Recall and Specificity and the trade-off between them. The iteration 12th have the best trade-off
-# Precision: 0.7500000, Recall: 0.4285714, Specificity: 0.875, with a Total of 34 Genes as feature Selection. 
-# As recommendation we could evaluate the normality of the features and perform transformation techniques to achieve a higher result.
+
+# Ensure AUC_Train and AUC_Test exist (add NA if missing)
+if (!"AUC_Train" %in% names(best_results)) best_results$AUC_Train <- NA
+if (!"AUC_Test" %in% names(best_results)) best_results$AUC_Test <- NA
+
+# Filter only the first row
+best_single <- best_results %>%
+  slice(1) %>%
+  transmute(
+    Model = "LDA",
+    nfeatures = NumGenes,
+    Genes,
+    
+    Accuracy_Train = AccuracyTrain,
+    Accuracy_Test = Accuracy_Test,
+    
+    Sensitivity_Train = Sensitivity_Train,
+    Sensitivity_Test = Sensitivity_Test,
+    
+    Specificity_Train = Specificity_Train,
+    Specificity_Test = Specificity_Test,
+    
+    PPV_Train = PPV_Train,
+    PPV_Test = PPV,
+    
+    NPV_Train = NPV_Train,
+    NPV_Test = NPV,
+    
+    AUC_Train = AUC_Train,
+    AUC_Test = AUC_Test
+  ) %>%
+  pivot_longer(
+    cols = -c(Model, nfeatures, Genes),
+    names_to = c("Metric", "subset"),
+    names_sep = "_"
+  ) %>%
+  pivot_wider(
+    names_from = Metric,
+    values_from = value
+  ) %>%
+  relocate(Model, subset, Accuracy, Sensitivity, Specificity, PPV, NPV, AUC, nfeatures, Genes)
 
 
-# === Plotting LDA ======
-# Choose the best row
-best_lda_row <- best_results[1, ]
-selected_genes <- unlist(strsplit(as.character(best_lda_row$Genes), ","))
-
-# Combine train and test before scaling
-combined_df <- rbind(
-  data.frame(train_genes[, selected_genes], Class = train_labels, Set = "Train"),
-  data.frame(test_genes[, selected_genes], Class = test_labels, Set = "Test")
-)
-
-#Scale predictors
-scaled_predictors <- scale(combined_df[, selected_genes])
-
-# Reattach class and set labels
-combined_scaled_df <- data.frame(scaled_predictors,
-                                 Class = combined_df$Class,
-                                 Set = combined_df$Set)
-
-# Split back into train and test
-lda_train_df <- subset(combined_scaled_df, Set == "Train")
-lda_test_df <- subset(combined_scaled_df, Set == "Test")
-
-
-# === Test Model Stats ===
-# Refit LDA model
-lda_model <- lda(Class ~ ., data = lda_train_df)
-lda_pred <- predict(lda_model, newdata = lda_test_df)
-
-# Confusion matrix Test DATA
-cm_lda <- confusionMatrix(
-  data = as.factor(lda_pred$class),
-  reference = as.factor(lda_test_df$Class),
-  positive = "1"
-)
-
-# AUC
-roc_lda <- pROC::roc(response = as.factor(lda_test_df$Class),
-               predictor = lda_pred$posterior[, "1"],
-               levels = rev(levels(as.factor(lda_test_df$Class))))
-auc_lda <- auc(roc_lda)
-
-# Number of features
-nfeats_lda <- length(selected_genes)
-
-# Consolidate results in metrics_lda table
-metrics_lda_test <- data.frame(
-  Model = "LDA",
-  Subset = 'Test',
-  Accuracy = as.numeric(cm_lda$overall["Accuracy"]),
-  Sensitivity = as.numeric(cm_lda$byClass["Sensitivity"]),
-  Specificity = as.numeric(cm_lda$byClass["Specificity"]),
-  PPV = as.numeric(cm_lda$byClass["Pos Pred Value"]),
-  NPV = as.numeric(cm_lda$byClass["Neg Pred Value"]),
-  AUC = as.numeric(auc_lda),
-  Nfeats = as.numeric(nfeats_lda)
-)
 ```
 
 # Model:Random Forest  
@@ -673,8 +664,11 @@ metrics_qda_train <- data.frame(
 
 # === Setting Up Radar chart plot ===
 
-metrics_all <- rbind(metrics_lda_test,
-                     metrics_rf_train,metrics_rf_test,
+metrics_all <- rbind(metrics_lda_test, metrics_lda_train)
+
+metrics_all <- rbind(best_single,
+                     metrics_rf_train,metrics_rf_test)
+
                      metrics_svm_train,metrics_svm_test)
 
 metrics_all <- rbind(metrics_lda_test,

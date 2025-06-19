@@ -13,6 +13,7 @@ library(pROC)
 library(dplyr)
 library(caret)
 library(scales) 
+library(tidyr)
 library(glmnet)
 library(ggplot2)
 library(reshape2)
@@ -113,6 +114,7 @@ remove_correlated_features <- function(train_df, test_df = NULL, cutoff = 0.8) {
 }
 
 ```
+
 
 # The goal of feature selection is to highligth those features that have contribution performance towards the prediction variable. 
 # LDA Feature Selection
@@ -221,11 +223,7 @@ for (i in 1:n_iter) {
                            predictor = train_pred$posterior[, "X1"],
                            levels = rev(levels(as.factor(train_df$Class))))
     auc_lda_train <- auc(roc_lda_train)
-    
-    
   
-    
-    # Append to results
     # Append to results
     weights_results <- rbind(weights_results, data.frame(Weights = paste(paste(rownames(feature_weights), round(feature_weights[, 1], 5), sep = ":"), collapse = ";")))
     
@@ -253,9 +251,6 @@ for (i in 1:n_iter) {
       Genes = paste(selected_genes, collapse = ",")
 
     ))
-    
-    
-    
   }
 }
 
@@ -319,19 +314,23 @@ best_single <- best_results %>%
   ) %>%
   pivot_longer(
     cols = -c(Model, nfeatures, Genes),
-    names_to = c("Metric", "subset"),
+    names_to = c("Metric", "Subset"),
     names_sep = "_"
   ) %>%
   pivot_wider(
     names_from = Metric,
     values_from = value
   ) %>%
-  relocate(Model, subset, Accuracy, Sensitivity, Specificity, PPV, NPV, AUC, nfeatures, Genes)
+  relocate(Model, Subset, Accuracy, Sensitivity, Specificity, PPV, NPV, AUC, nfeatures, Genes)
 
+lda_metrics <- best_single %>%
+  rename(Nfeats = nfeatures) %>%
+  select(-Genes)
 
 ```
 
-# Model:Random Forest  
+
+# Model:Random Forest Full Variables
 # Resample Techinque: K - Fold Cross Validation
 ```{r setup, include=FALSE}
 #The following code block is performing a Random forest (RF) using as resampling technique 10 fold cross validation. 
@@ -340,26 +339,22 @@ set.seed(125)
 # Load Data
 df <- load_gene_subset(group_number = 7, include_class = TRUE)
 
-# shuffle data to minimize random effects
-shuffled_df <-  df[sample(nrow(df)),]
-
 # Separate predictors and class
-genes_only <- shuffled_df[, setdiff(names(shuffled_df), "Class")]
+genes_only <- df[, setdiff(names(df), "Class")]
 all_genes <- colnames(genes_only)
 
 # Create training 80% and test 20%, 
-train <- createDataPartition(shuffled_df$Class, p = 0.8, list = FALSE, times = 1)
-df_train <- shuffled_df[train,]
-df_test <- shuffled_df[-train,]
+train <- createDataPartition(df$Class, p = 0.8, list = FALSE, times = 1)
+df_train <- df[train,]
+df_test <- df[-train,]
 
-# 1. Random Forest model using repeated 10-fold cross-validation
-# With regression problems the default value is often  mtry = p3 and for classification mtry=√p
+
+# Define hyperparameter grid for RF
 num_features <- ncol(df_train) - 1
-sqrt_mtry <- floor(sqrt(num_features))
-
-tunegrid_rf <- expand.grid(
-  mtry = c(max(1, sqrt_mtry - 2), sqrt_mtry, sqrt_mtry + 2)
-)
+sqrt_mtry    <- floor(sqrt(num_features))
+tunegrid_rf  <- expand.grid(
+                  mtry = c(max(1, sqrt_mtry - 2), sqrt_mtry, sqrt_mtry + 2)
+                )
 
 # TrainControl must include classProbs = TRUE
 ctrl <- trainControl(
@@ -372,7 +367,7 @@ ctrl <- trainControl(
 )
 
 # Target variable is a factor
-df_train$Class <- as.factor(df_train$Class)
+df_train$Class         <- as.factor(df_train$Class)
 levels(df_train$Class) <- make.names(levels(df_train$Class))
 
 # Train random forest model with tuneGrid and cross-validation
@@ -403,8 +398,9 @@ true_labels <- model_rf$pred$obs
 # Confusion Matrix
 cm <- confusionMatrix(predictions, true_labels)
 
-metrics_rf_train <- data.frame(
+metrics_rf_train_cv <- data.frame(
   Model = "RF",
+  resampling = 'CV',
   Subset = 'Train',
   Accuracy = as.numeric(cm$overall["Accuracy"]),
   Sensitivity = as.numeric(cm$byClass["Sensitivity"]),
@@ -435,8 +431,9 @@ roc_test_rf <- pROC::roc(response = as.factor(df_test$Class),
 
 auc_value_rf_test <- auc(roc_test_rf)
 
-metrics_rf_test <- data.frame(
+metrics_rf_test_cv <- data.frame(
   Model = "RF",
+  resampling = 'CV',
   Subset = 'Test',
   Accuracy = as.numeric(cm_test$overall["Accuracy"]),
   Sensitivity = as.numeric(cm_test$byClass["Sensitivity"]),
@@ -447,6 +444,262 @@ metrics_rf_test <- data.frame(
   Nfeats = ncol(df_test) - 1
 )
 ```
+
+
+# Model:Random Forest - Feature Selection
+# Resample Techinque: K - Fold Cross Validation
+```{r setup, include=FALSE}
+# Reproducible
+set.seed(125) 
+
+# Load Data
+df <- load_gene_subset(group_number = 7, include_class = TRUE)
+selected_genes <- unlist(strsplit(best_results$Genes[1], split = ","))
+selected_genes <- trimws(selected_genes)
+
+#Make sure to filter contributing genes and class label in the df_filtered
+df_filtered <- df[, selected_genes, drop = FALSE]
+df_filtered <- df[, c(selected_genes, "Class")]
+
+# Separate predictors and class
+genes_only <- df_filtered[, setdiff(names(df_filtered), "Class")]
+all_genes <- colnames(genes_only)
+
+# Create training 80% and test 20%, 
+train <- createDataPartition(df_filtered$Class, p = 0.8, list = FALSE, times = 1)
+df_train <- df_filtered[train,]
+df_test <- df_filtered[-train,]
+
+# Define hyperparameter grid for RF
+num_features <- ncol(df_train) - 1
+sqrt_mtry    <- floor(sqrt(num_features))
+tunegrid_rf  <- expand.grid(
+                  mtry = c(max(1, sqrt_mtry - 2), sqrt_mtry, sqrt_mtry + 2)
+                )
+
+# TrainControl must include classProbs = TRUE
+ctrl <- trainControl(
+  method = "cv",
+  search = "grid",
+  number = 10,
+  classProbs = TRUE,
+  savePredictions = "final",
+  summaryFunction = twoClassSummary
+)
+
+# Target variable is a factor
+df_train$Class         <- as.factor(df_train$Class)
+levels(df_train$Class) <- make.names(levels(df_train$Class))
+
+
+# Train random forest model with tuneGrid and cross-validation
+model_rf <- train(
+  Class ~ .,
+  data = df_train,
+  method = "rf",
+  trControl = ctrl,
+  preProcess = c("center", "scale"),
+  tuneGrid = expand.grid(mtry = floor(sqrt(ncol(df_train) - 1))),
+  ntree = 100,
+  metric = "ROC"
+)
+
+
+# === Training Model Stats === 
+roc_obj <- pROC::roc(
+  response = model_rf$pred$obs,
+  predictor = model_rf$pred$X1,  # X1 is the class label "1" after make.names()
+  levels = rev(levels(model_rf$pred$obs))
+)
+
+auc_value_rf <- auc(roc_obj)
+
+# Get predicted classes and true labels
+predictions <- model_rf$pred$pred
+true_labels <- model_rf$pred$obs
+
+# Confusion Matrix
+cm <- confusionMatrix(predictions, true_labels)
+
+metrics_rf_train_cv_fs <- data.frame(
+  Model = "RF",
+  resampling = 'CV',
+  Subset = 'Train',
+  Accuracy = as.numeric(cm$overall["Accuracy"]),
+  Sensitivity = as.numeric(cm$byClass["Sensitivity"]),
+  Specificity = as.numeric(cm$byClass["Specificity"]),
+  PPV = as.numeric(cm$byClass["Pos Pred Value"]),
+  NPV = as.numeric(cm$byClass["Neg Pred Value"]),
+  AUC = as.numeric(auc_value_rf),
+  Nfeats = as.numeric(ncol(df_train) - 1 )
+)
+
+# === Test Model Stats ===
+prob_test <- predict(model_rf, newdata = df_test, type = "prob")
+pred_class_test <- predict(model_rf, newdata = df_test, type = "raw")
+
+df_test$Class <- make.names(df_test$Class)
+df_test$Class <- factor(df_test$Class, levels = levels(pred_class_test))
+
+cm_test <- confusionMatrix(
+  pred_class_test,
+  reference = as.factor(df_test$Class), 
+  positive = "X1"
+  )
+
+# AUC
+roc_test_rf <- pROC::roc(response = as.factor(df_test$Class),
+               predictor = prob_test$X1,
+               levels = rev(levels(as.factor(df_test$Class))))
+
+auc_value_rf_test <- auc(roc_test_rf)
+
+metrics_rf_test_cv_fs <- data.frame(
+  Model = "RF",
+  resampling = 'CV',
+  Subset = 'Test',
+  Accuracy = as.numeric(cm_test$overall["Accuracy"]),
+  Sensitivity = as.numeric(cm_test$byClass["Sensitivity"]),
+  Specificity = as.numeric(cm_test$byClass["Specificity"]),
+  PPV = as.numeric(cm_test$byClass["Pos Pred Value"]),
+  NPV = as.numeric(cm_test$byClass["Neg Pred Value"]),
+  AUC = as.numeric(auc_value_rf_test),
+  Nfeats = ncol(df_test) - 1
+)
+
+```
+
+
+
+# Model:Random Forest Full Variables
+# No Resample Technique
+```{r setup, include=FALSE}
+
+#The following code block is performing a Random forest (RF) using as resampling technique 10 fold cross validation. 
+set.seed(125) 
+
+# Load Data
+df <- load_gene_subset(group_number = 7, include_class = TRUE)
+
+# Separate predictors and class
+genes_only <- df[, setdiff(names(df), "Class")]
+all_genes <- colnames(genes_only)
+
+# Create training 80% and test 20%, 
+train <- createDataPartition(df$Class, p = 0.8, list = FALSE, times = 1)
+df_train <- df[train,]
+df_test <- df[-train,]
+
+# Define hyperparameter RF
+num_features <- ncol(df_train) - 1
+sqrt_mtry    <- floor(sqrt(ncol(df_train) - 1))
+
+ctrl <- trainControl(
+  method = "none",
+  number = 10,
+  classProbs = TRUE,
+  savePredictions = "final",
+  summaryFunction = twoClassSummary
+)
+
+# Target variable is a factor
+df_train$Class         <- as.factor(df_train$Class)
+levels(df_train$Class) <- make.names(levels(df_train$Class))
+
+# Train random forest model with tuneGrid and cross-validation
+model_rf <- train(
+  Class ~ .,
+  data = df_train,
+  method = "rf",
+  trControl = ctrl,
+  preProcess = c("center", "scale"),
+  tuneGrid = expand.grid(mtry = sqrt_mtry),
+  ntree = 100,
+  metric = "ROC"
+)
+
+# === Training Model Stats === 
+probs <- predict(model_rf, df_train, type = "prob")[, "X1"]
+roc_obj <- pROC::roc(
+  response = df_train$Class,
+  predictor = probs,  # X1 is the class label "1" after make.names()
+  levels = c("X2","X1")
+)
+
+auc_value_rf <- auc(roc_obj)
+
+# Get predicted classes and true labels
+predictions <- predict(model_rf, df_train)
+true_labels <- df_train$Class
+
+# Confusion Matrix
+cm <- confusionMatrix(predictions, true_labels, )
+
+metrics_rf_train <- data.frame(
+  Model = "RF",
+  resampling = 'No RS',
+  Subset = 'Train',
+  Accuracy = as.numeric(cm$overall["Accuracy"]),
+  Sensitivity = as.numeric(cm$byClass["Sensitivity"]),
+  Specificity = as.numeric(cm$byClass["Specificity"]),
+  PPV = as.numeric(cm$byClass["Pos Pred Value"]),
+  NPV = as.numeric(cm$byClass["Neg Pred Value"]),
+  AUC = as.numeric(auc_value_rf),
+  Nfeats = as.numeric(ncol(df_train) - 1 )
+)
+
+
+# === Test Model Stats ===
+prob_test <- predict(model_rf, df_test, type = "prob")[, "X1"]
+pred_class_test <- predict(model_rf, newdata = df_test, type = "raw")
+
+df_test$Class <- make.names(df_test$Class)
+df_test$Class <- factor(df_test$Class, levels = levels(pred_class_test))
+
+# AUC
+roc_test_rf <- pROC::roc(
+  response = as.factor(df_test$Class),
+  predictor = prob_test,
+  levels = c("X2","X1")
+  )
+
+auc_value_rf_test <- auc(roc_test_rf)
+
+# Get predicted classes and true labels
+predictions <- predict(model_rf, df_test)
+true_labels <- df_test$Class
+
+cm_test <- confusionMatrix(
+  predictions,
+  true_labels, 
+  positive = "X1"
+  )
+
+
+metrics_rf_test <- data.frame(
+  Model = "RF",
+  resampling = 'No RS',
+  Subset = 'Test',
+  Accuracy = as.numeric(cm_test$overall["Accuracy"]),
+  Sensitivity = as.numeric(cm_test$byClass["Sensitivity"]),
+  Specificity = as.numeric(cm_test$byClass["Specificity"]),
+  PPV = as.numeric(cm_test$byClass["Pos Pred Value"]),
+  NPV = as.numeric(cm_test$byClass["Neg Pred Value"]),
+  AUC = as.numeric(auc_value_rf_test),
+  Nfeats = ncol(df_test) - 1
+)
+
+
+metrics_rf <- rbind(
+  metrics_rf_train_cv,
+  metrics_rf_test_cv,
+  metrics_rf_train_cv_fs,
+  metrics_rf_test_cv_fs,
+  metrics_rf_train,
+  metrics_rf_test
+)
+```
+
 
 #Perform SVM using resampling technique 
 ```{r setup, include=FALSE}
@@ -664,7 +917,9 @@ metrics_qda_train <- data.frame(
 
 # === Setting Up Radar chart plot ===
 
-metrics_all <- rbind(metrics_lda_test, metrics_lda_train)
+metrics_all <- rbind(lda_metrics,
+                     metrics_rf_train, metrics_rf_test,
+                     metrics_svm_train,metrics_svm_test)
 
 metrics_all <- rbind(best_single,
                      metrics_rf_train,metrics_rf_test)

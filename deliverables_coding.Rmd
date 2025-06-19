@@ -291,6 +291,7 @@ best_single <- best_results %>%
   slice(1) %>%
   transmute(
     Model = "LDA",
+    resampling = 'No RS',
     nfeatures = NumGenes,
     Genes,
     
@@ -313,7 +314,7 @@ best_single <- best_results %>%
     AUC_Test = AUC_Test
   ) %>%
   pivot_longer(
-    cols = -c(Model, nfeatures, Genes),
+    cols = -c(Model, resampling, nfeatures, Genes),
     names_to = c("Metric", "Subset"),
     names_sep = "_"
   ) %>%
@@ -321,14 +322,13 @@ best_single <- best_results %>%
     names_from = Metric,
     values_from = value
   ) %>%
-  relocate(Model, Subset, Accuracy, Sensitivity, Specificity, PPV, NPV, AUC, nfeatures, Genes)
+  relocate(Model, resampling, Subset, Accuracy, Sensitivity, Specificity, PPV, NPV, AUC, nfeatures, Genes)
 
 lda_metrics <- best_single %>%
   rename(Nfeats = nfeatures) %>%
   select(-Genes)
 
 ```
-
 
 # Model:Random Forest Full Variables
 # Resample Techinque: K - Fold Cross Validation
@@ -396,7 +396,7 @@ predictions <- model_rf$pred$pred
 true_labels <- model_rf$pred$obs
 
 # Confusion Matrix
-cm <- confusionMatrix(predictions, true_labels)
+cm <- confusionMatrix(predictions, true_labels, positive = "X1")
 
 metrics_rf_train_cv <- data.frame(
   Model = "RF",
@@ -445,11 +445,9 @@ metrics_rf_test_cv <- data.frame(
 )
 ```
 
-
 # Model:Random Forest - Feature Selection
 # Resample Techinque: K - Fold Cross Validation
 ```{r setup, include=FALSE}
-# Reproducible
 set.seed(125) 
 
 # Load Data
@@ -519,7 +517,7 @@ predictions <- model_rf$pred$pred
 true_labels <- model_rf$pred$obs
 
 # Confusion Matrix
-cm <- confusionMatrix(predictions, true_labels)
+cm <- confusionMatrix(predictions, true_labels, positive = "X1")
 
 metrics_rf_train_cv_fs <- data.frame(
   Model = "RF",
@@ -568,8 +566,6 @@ metrics_rf_test_cv_fs <- data.frame(
 )
 
 ```
-
-
 
 # Model:Random Forest Full Variables
 # No Resample Technique
@@ -633,7 +629,7 @@ predictions <- predict(model_rf, df_train)
 true_labels <- df_train$Class
 
 # Confusion Matrix
-cm <- confusionMatrix(predictions, true_labels, )
+cm <- confusionMatrix(predictions, true_labels, positive = "X1")
 
 metrics_rf_train <- data.frame(
   Model = "RF",
@@ -688,22 +684,253 @@ metrics_rf_test <- data.frame(
   AUC = as.numeric(auc_value_rf_test),
   Nfeats = ncol(df_test) - 1
 )
+```
+
+# Model:Random Forest - Feature Selection
+# No Resample Technique
+```{r setup, include=FALSE}
+# Reproducible
+set.seed(125) 
+
+# Load Data
+df <- load_gene_subset(group_number = 7, include_class = TRUE)
+selected_genes <- unlist(strsplit(best_results$Genes[1], split = ","))
+selected_genes <- trimws(selected_genes)
+
+#Make sure to filter contributing genes and class label in the df_filtered
+df_filtered <- df[, selected_genes, drop = FALSE]
+df_filtered <- df[, c(selected_genes, "Class")]
+
+# Separate predictors and class
+genes_only <- df_filtered[, setdiff(names(df_filtered), "Class")]
+all_genes <- colnames(genes_only)
+
+# Create training 80% and test 20%, 
+train <- createDataPartition(df_filtered$Class, p = 0.8, list = FALSE, times = 1)
+df_train <- df_filtered[train,]
+df_test <- df_filtered[-train,]
+
+# Define hyperparameter RF
+num_features <- ncol(df_train) - 1
+sqrt_mtry    <- floor(sqrt(ncol(df_train) - 1))
+
+ctrl <- trainControl(
+  method = "none",
+  number = 10,
+  classProbs = TRUE,
+  savePredictions = "final",
+  summaryFunction = twoClassSummary
+)
+
+# Target variable is a factor
+df_train$Class         <- as.factor(df_train$Class)
+levels(df_train$Class) <- make.names(levels(df_train$Class))
+
+# Train random forest model with tuneGrid and cross-validation
+model_rf <- train(
+  Class ~ .,
+  data = df_train,
+  method = "rf",
+  trControl = ctrl,
+  preProcess = c("center", "scale"),
+  tuneGrid = expand.grid(mtry = sqrt_mtry),
+  ntree = 100,
+  metric = "ROC"
+)
+
+# === Training Model Stats === 
+probs <- predict(model_rf, df_train, type = "prob")[, "X1"]
+roc_obj <- pROC::roc(
+  response = df_train$Class,
+  predictor = probs,  # X1 is the class label "1" after make.names()
+  levels = c("X2","X1")
+)
+
+auc_value_rf <- auc(roc_obj)
+
+# Get predicted classes and true labels
+predictions <- predict(model_rf, df_train)
+true_labels <- df_train$Class
+
+# Confusion Matrix
+cm <- confusionMatrix(predictions, true_labels, positive = "X1" )
+
+metrics_rf_train_fs <- data.frame(
+  Model = "RF",
+  resampling = 'No RS',
+  Subset = 'Train',
+  Accuracy = as.numeric(cm$overall["Accuracy"]),
+  Sensitivity = as.numeric(cm$byClass["Sensitivity"]),
+  Specificity = as.numeric(cm$byClass["Specificity"]),
+  PPV = as.numeric(cm$byClass["Pos Pred Value"]),
+  NPV = as.numeric(cm$byClass["Neg Pred Value"]),
+  AUC = as.numeric(auc_value_rf),
+  Nfeats = as.numeric(ncol(df_train) - 1 )
+)
 
 
-metrics_rf <- rbind(
-  metrics_rf_train_cv,
-  metrics_rf_test_cv,
-  metrics_rf_train_cv_fs,
-  metrics_rf_test_cv_fs,
-  metrics_rf_train,
-  metrics_rf_test
+# === Test Model Stats ===
+prob_test <- predict(model_rf, df_test, type = "prob")[, "X1"]
+pred_class_test <- predict(model_rf, newdata = df_test, type = "raw")
+
+df_test$Class <- make.names(df_test$Class)
+df_test$Class <- factor(df_test$Class, levels = levels(pred_class_test))
+
+# AUC
+roc_test_rf <- pROC::roc(
+  response = as.factor(df_test$Class),
+  predictor = prob_test,
+  levels = c("X2","X1")
+  )
+
+auc_value_rf_test <- auc(roc_test_rf)
+
+# Get predicted classes and true labels
+predictions <- predict(model_rf, df_test)
+true_labels <- df_test$Class
+
+cm_test <- confusionMatrix(
+  predictions,
+  true_labels, 
+  positive = "X1"
+  )
+
+
+metrics_rf_test_fs <- data.frame(
+  Model = "RF",
+  resampling = 'No RS',
+  Subset = 'Test',
+  Accuracy = as.numeric(cm_test$overall["Accuracy"]),
+  Sensitivity = as.numeric(cm_test$byClass["Sensitivity"]),
+  Specificity = as.numeric(cm_test$byClass["Specificity"]),
+  PPV = as.numeric(cm_test$byClass["Pos Pred Value"]),
+  NPV = as.numeric(cm_test$byClass["Neg Pred Value"]),
+  AUC = as.numeric(auc_value_rf_test),
+  Nfeats = ncol(df_test) - 1
 )
 ```
 
-
-#Perform SVM using resampling technique 
+# Model: SVM Full Variables
+# Resample Technique: K- Fold Cross Validation
 ```{r setup, include=FALSE}
+set.seed(125) 
 
+# Load Data filter using feature selection from first point 
+df <- load_gene_subset(group_number = 7, include_class = TRUE)
+
+# Separate predictors and class
+genes_only <- df[, setdiff(names(df), "Class")]
+all_genes <- colnames(genes_only)
+
+# Create training 80% and test 20%, 
+train <- createDataPartition(df$Class, p = 0.8, list = FALSE, times = 1)
+df_train <- df[train,]
+df_test <- df[-train,]
+
+# Target variable is a factor
+df_train$Class <- as.factor(df_train$Class)
+levels(df_train$Class) <- make.names(levels(df_train$Class))
+
+
+# TrainControl must include classProbs = TRUE
+ctrl_svm <- trainControl(
+  method = "cv",
+  search = "grid",
+  number = 10,
+  classProbs = TRUE,
+  savePredictions = "final",
+  summaryFunction = twoClassSummary
+)
+
+# Estimate sigma for radial kernel using full data
+sig_est    <- kernlab::sigest(Class ~ ., data = df_train)
+sigma_med  <- as.numeric(sig_est)[2]
+
+# Define grid of sigma and cost
+svm_grid_full <- expand.grid(
+      sigma = sigma_med * c(0.5, 1, 2),
+      C     = c(0.25, 1, 4)
+    )
+
+# Train SVM model with cross-validation and considering feature selection from LDA 
+model_sv <- train(
+  Class ~ .,
+  data = df_train,
+  method = "svmRadial",
+  trControl = ctrl_svm,
+  preProcess = c("center", "scale"),
+  tuneGrid   = svm_grid_full,
+  ntree = 100,
+  tuneLength = 10,
+  metric = "ROC"
+)
+
+# === Training Model Stats === 
+roc_obj <- pROC::roc(
+  response = model_sv$pred$obs,
+  predictor = model_sv$pred$X1,  
+  levels = rev(levels(model_sv$pred$obs))
+)
+
+auc_value_svm <- auc(roc_obj)
+
+# Get predicted classes and true labels
+predictions <- model_sv$pred$pred
+true_labels <- model_sv$pred$obs
+
+# Confusion Matrix
+cm <- confusionMatrix(predictions, true_labels, positive = "X1")
+
+metrics_svm_train_cv <- data.frame(
+  Model = "SVM",
+  resampling = 'CV',
+  Subset = 'Train',
+  Accuracy = as.numeric(cm$overall["Accuracy"]),
+  Sensitivity = as.numeric(cm$byClass["Sensitivity"]),
+  Specificity = as.numeric(cm$byClass["Specificity"]),
+  PPV = as.numeric(cm$byClass["Pos Pred Value"]),
+  NPV = as.numeric(cm$byClass["Neg Pred Value"]),
+  AUC = as.numeric(auc_value_svm),
+  Nfeats = as.numeric(ncol(df_train) - 1)
+)
+
+# === Testing Model Stats ===
+prob_test <- predict(model_sv, newdata = df_test, type = "prob")
+pred_class_test <- predict(model_sv, newdata = df_test, type = "raw")
+
+df_test$Class <- make.names(df_test$Class)
+df_test$Class <- factor(df_test$Class, levels = levels(pred_class_test))
+
+cm_test <- confusionMatrix(
+  pred_class_test,
+  reference = df_test$Class, 
+  positive = "X1"
+  )
+
+# AUC
+roc_svm <- pROC::roc(response = as.factor(df_test$Class),
+               predictor = prob_test$X1,
+               levels = rev(levels(as.factor(df_test$Class))))
+auc_value_svm <- auc(roc_svm)
+
+metrics_svm_test_cv <- data.frame(
+  Model = "SVM",
+  resampling = 'CV',
+  Subset = 'Test',
+  Accuracy = as.numeric(cm_test$overall["Accuracy"]),
+  Sensitivity = as.numeric(cm_test$byClass["Sensitivity"]),
+  Specificity = as.numeric(cm_test$byClass["Specificity"]),
+  PPV = as.numeric(cm_test$byClass["Pos Pred Value"]),
+  NPV = as.numeric(cm_test$byClass["Neg Pred Value"]),
+  AUC = as.numeric(auc_value_svm),
+  Nfeats = as.numeric(ncol(df_test) - 1)
+)
+
+```
+
+# Model: SVM - Feature Selection
+# Resample Technique: K- Fold Cross Validation
+```{r setup, include=FALSE}
 set.seed(125) 
 # Load Data filter using feature selection from first point 
 df <- load_gene_subset(group_number = 7, include_class = TRUE)
@@ -735,6 +962,7 @@ test_df <- data.frame(test_genes, Class = test_labels)
 train_df$Class <- as.factor(train_df$Class)
 levels(train_df$Class) <- make.names(levels(train_df$Class))
 
+
 # TrainControl must include classProbs = TRUE
 ctrl_svm <- trainControl(
   method = "cv",
@@ -745,6 +973,16 @@ ctrl_svm <- trainControl(
   summaryFunction = twoClassSummary
 )
 
+# Estimate sigma for radial kernel using full data
+sig_est    <- kernlab::sigest(Class ~ ., data = df_train)
+sigma_med  <- as.numeric(sig_est)[2]
+
+# Define grid of sigma and cost
+svm_grid_full <- expand.grid(
+      sigma = sigma_med * c(0.5, 1, 2),
+      C     = c(0.25, 1, 4)
+    )
+
 # Train SVM model with cross-validation and considering feature selection from LDA 
 model_sv <- train(
   Class ~ .,
@@ -752,14 +990,16 @@ model_sv <- train(
   method = "svmRadial",
   trControl = ctrl_svm,
   preProcess = c("center", "scale"),
+  tuneGrid   = svm_grid_full,
   ntree = 100,
   tuneLength = 10,
   metric = "ROC"
 )
 
+# === Training Model Stats === 
 roc_obj <- pROC::roc(
   response = model_sv$pred$obs,
-  predictor = model_sv$pred$X1,  # X1 is the class label "1" after make.names()
+  predictor = model_sv$pred$X1,  
   levels = rev(levels(model_sv$pred$obs))
 )
 
@@ -770,10 +1010,11 @@ predictions <- model_sv$pred$pred
 true_labels <- model_sv$pred$obs
 
 # Confusion Matrix
-cm <- confusionMatrix(predictions, true_labels)
+cm <- confusionMatrix(predictions, true_labels, positive = "X1")
 
-metrics_svm_train <- data.frame(
+metrics_svm_train_cv_fs <- data.frame(
   Model = "SVM",
+  resampling = 'CV',
   Subset = 'Train',
   Accuracy = as.numeric(cm$overall["Accuracy"]),
   Sensitivity = as.numeric(cm$byClass["Sensitivity"]),
@@ -805,8 +1046,9 @@ roc_svm <- pROC::roc(response = as.factor(test_df$Class),
                levels = rev(levels(as.factor(test_df$Class))))
 auc_value_svm <- auc(roc_svm)
 
-metrics_svm_test <- data.frame(
+metrics_svm_test_cv_fs <- data.frame(
   Model = "SVM",
+  resampling = 'CV',
   Subset = 'Test',
   Accuracy = as.numeric(cm_test$overall["Accuracy"]),
   Sensitivity = as.numeric(cm_test$byClass["Sensitivity"]),
@@ -820,8 +1062,291 @@ metrics_svm_test <- data.frame(
 
 ```
 
+# Model: SVM Full Variables
+# No Resample Technique
+```{r setup, include=FALSE}
+set.seed(125) 
 
-#QDA Model
+# Load Data filter using feature selection from first point 
+df <- load_gene_subset(group_number = 7, include_class = TRUE)
+df$Class <- factor(df$Class, levels = c(1, 2), labels = c("X1","X2"))
+
+# Separate predictors and class
+genes_only <- df[, setdiff(names(df), "Class")]
+all_genes <- colnames(genes_only)
+
+# Create training 80% and test 20%, 
+train <- createDataPartition(df$Class, p = 0.8, list = FALSE, times = 1)
+df_train <- df[train,]
+df_test <- df[-train,]
+
+# Target variable is a factor
+df_train$Class <- as.factor(df_train$Class)
+levels(df_train$Class) <- make.names(levels(df_train$Class))
+
+
+# TrainControl must include classProbs = TRUE
+ctrl_none <- trainControl(
+  method          = "none",         
+  classProbs      = TRUE,
+  summaryFunction = twoClassSummary
+)
+
+# Estimate sigma for radial kernel using full data
+sig_est    <- kernlab::sigest(Class ~ ., data = df_train)
+sigma_med  <- as.numeric(sig_est)[2]
+
+# Define grid of sigma and cost
+svm_grid <- expand.grid(
+  sigma = sigma_med,  # middle estimate
+  C     = 1           # chosen cost
+)
+
+# Train SVM model with cross-validation and considering feature selection from LDA 
+model_svm <- train(
+  Class ~ ., 
+  data       = df_train,
+  method     = "svmRadial",
+  preProcess = c("center","scale"),
+  tuneGrid   = svm_grid,
+  metric     = "ROC",
+  trControl  = ctrl_none
+)
+
+# === Training Model Stats === 
+# Predict probabilities & classes on the training set
+train_probs  <- predict(model_svm, df_train, type = "prob")[, "X1"]
+train_preds  <- predict(model_svm, df_train)
+train_preds <- factor(train_preds, levels = levels(df_train$Class))
+
+roc_obj <- pROC::roc(
+  response  = df_train$Class,
+  predictor = train_probs,  
+  levels    = rev(levels(df_train$Class))
+)
+
+auc_value_svm <- auc(roc_obj)
+
+# Get predicted classes and true labels
+predictions <- model_svm$pred$pred
+true_labels <- model_svm$pred$obs
+
+# Confusion Matrix
+cm <- confusionMatrix(train_preds, df_train$Class,, positive = "X1")
+
+metrics_svm_train <- data.frame(
+  Model = "SVM",
+  resampling = 'No RS',
+  Subset = 'Train',
+  Accuracy = as.numeric(cm$overall["Accuracy"]),
+  Sensitivity = as.numeric(cm$byClass["Sensitivity"]),
+  Specificity = as.numeric(cm$byClass["Specificity"]),
+  PPV = as.numeric(cm$byClass["Pos Pred Value"]),
+  NPV = as.numeric(cm$byClass["Neg Pred Value"]),
+  AUC = as.numeric(auc_value_svm),
+  Nfeats = as.numeric(ncol(df_train) - 1)
+)
+
+# === Testing Model Stats ===
+prob_test <- predict(model_sv, newdata = df_test, type = "prob")
+pred_class_test <- predict(model_sv, newdata = df_test, type = "raw")
+
+df_test$Class <- make.names(df_test$Class)
+df_test$Class <- factor(df_test$Class, levels = levels(pred_class_test))
+
+cm_test <- confusionMatrix(
+  pred_class_test,
+  reference = df_test$Class, 
+  positive = "X1"
+  )
+
+# AUC
+roc_svm <- pROC::roc(response = as.factor(df_test$Class),
+               predictor = prob_test$X1,
+               levels = rev(levels(as.factor(df_test$Class))))
+auc_value_svm <- auc(roc_svm)
+
+metrics_svm_test <- data.frame(
+  Model = "SVM",
+  resampling = 'No RS',
+  Subset = 'Test',
+  Accuracy = as.numeric(cm_test$overall["Accuracy"]),
+  Sensitivity = as.numeric(cm_test$byClass["Sensitivity"]),
+  Specificity = as.numeric(cm_test$byClass["Specificity"]),
+  PPV = as.numeric(cm_test$byClass["Pos Pred Value"]),
+  NPV = as.numeric(cm_test$byClass["Neg Pred Value"]),
+  AUC = as.numeric(auc_value_svm),
+  Nfeats = as.numeric(ncol(df_test) - 1)
+)
+```
+
+# Model: SVM - Feature Selection
+# No Resample Technique
+```{r setup, include=FALSE}
+set.seed(125) 
+# Load Data filter using feature selection from first point 
+df <- load_gene_subset(group_number = 7, include_class = TRUE)
+df$Class <- factor(df$Class, levels = c(1, 2), labels = c("X1","X2"))
+
+selected_genes <- unlist(strsplit(best_results$Genes[1], split = ","))
+selected_genes <- trimws(selected_genes)
+
+#Make sure to filter contributing genes and class label in the df_filtered
+df_filtered <- df[, selected_genes, drop = FALSE]
+df_filtered <- df[, c(selected_genes, "Class")]
+
+# Separate predictors and class
+genes_only <- df_filtered[, setdiff(names(df_filtered), "Class")]
+all_genes <- colnames(genes_only)
+
+# Create training 80% and test 20%, 
+train <- createDataPartition(df_filtered$Class, p = 0.8, list = FALSE, times = 1)
+df_train <- df_filtered[train,]
+df_test <- df_filtered[-train,]
+
+# Target variable is a factor
+df_train$Class <- as.factor(df_train$Class)
+levels(df_train$Class) <- make.names(levels(df_train$Class))
+
+
+# TrainControl must include classProbs = TRUE
+ctrl_none <- trainControl(
+  method          = "none",         
+  classProbs      = TRUE,
+  summaryFunction = twoClassSummary
+)
+
+# Estimate sigma for radial kernel using full data
+sig_est    <- kernlab::sigest(Class ~ ., data = df_train)
+sigma_med  <- as.numeric(sig_est)[2]
+
+# Define grid of sigma and cost
+svm_grid <- expand.grid(
+  sigma = sigma_med,  # middle estimate
+  C     = 1           # chosen cost
+)
+
+# Train SVM model with cross-validation and considering feature selection from LDA 
+model_svm <- train(
+  Class ~ ., 
+  data       = df_train,
+  method     = "svmRadial",
+  preProcess = c("center","scale"),
+  tuneGrid   = svm_grid,
+  metric     = "ROC",
+  trControl  = ctrl_none
+)
+
+# === Training Model Stats === 
+# Predict probabilities & classes on the training set
+train_probs  <- predict(model_svm, df_train, type = "prob")[, "X1"]
+train_preds  <- predict(model_svm, df_train)
+train_preds <- factor(train_preds, levels = levels(df_train$Class))
+
+roc_obj <- pROC::roc(
+  response  = df_train$Class,
+  predictor = train_probs,  
+  levels    = rev(levels(df_train$Class))
+)
+
+auc_value_svm <- auc(roc_obj)
+
+# Get predicted classes and true labels
+predictions <- model_svm$pred$pred
+true_labels <- model_svm$pred$obs
+
+# Confusion Matrix
+cm <- confusionMatrix(train_preds, df_train$Class,, positive = "X1")
+
+metrics_svm_train_fs <- data.frame(
+  Model = "SVM",
+  resampling = 'No RS',
+  Subset = 'Train',
+  Accuracy = as.numeric(cm$overall["Accuracy"]),
+  Sensitivity = as.numeric(cm$byClass["Sensitivity"]),
+  Specificity = as.numeric(cm$byClass["Specificity"]),
+  PPV = as.numeric(cm$byClass["Pos Pred Value"]),
+  NPV = as.numeric(cm$byClass["Neg Pred Value"]),
+  AUC = as.numeric(auc_value_svm),
+  Nfeats = as.numeric(ncol(df_train) - 1)
+)
+
+# === Testing Model Stats ===
+prob_test <- predict(model_sv, newdata = df_test, type = "prob")
+pred_class_test <- predict(model_sv, newdata = df_test, type = "raw")
+
+df_test$Class <- make.names(df_test$Class)
+df_test$Class <- factor(df_test$Class, levels = levels(pred_class_test))
+
+cm_test <- confusionMatrix(
+  pred_class_test,
+  reference = df_test$Class, 
+  positive = "X1"
+  )
+
+# AUC
+roc_svm <- pROC::roc(response = as.factor(df_test$Class),
+               predictor = prob_test$X1,
+               levels = rev(levels(as.factor(df_test$Class))))
+auc_value_svm <- auc(roc_svm)
+
+metrics_svm_test_fs <- data.frame(
+  Model = "SVM",
+  resampling = 'No RS',
+  Subset = 'Test',
+  Accuracy = as.numeric(cm_test$overall["Accuracy"]),
+  Sensitivity = as.numeric(cm_test$byClass["Sensitivity"]),
+  Specificity = as.numeric(cm_test$byClass["Specificity"]),
+  PPV = as.numeric(cm_test$byClass["Pos Pred Value"]),
+  NPV = as.numeric(cm_test$byClass["Neg Pred Value"]),
+  AUC = as.numeric(auc_value_svm),
+  Nfeats = as.numeric(ncol(df_test) - 1)
+)
+
+```
+
+# Model: SVM - Feature Selection
+```{r setup, include=FALSE}
+
+
+
+```
+
+
+
+```{r setup, include=FALSE}
+
+metrics_rf <- rbind(
+  metrics_rf_train_cv,
+  metrics_rf_test_cv,
+  metrics_rf_train_cv_fs,
+  metrics_rf_test_cv_fs,
+  metrics_rf_train,
+  metrics_rf_test,
+  metrics_rf_train_fs,
+  metrics_rf_test_fs
+)
+
+metrics_svm <- rbind(
+  metrics_svm_train_cv,
+  metrics_svm_test_cv,
+  metrics_svm_train_cv_fs,
+  metrics_svm_test_cv_fs,
+  metrics_svm_train,
+  metrics_svm_test,
+  metrics_svm_train_fs,
+  metrics_svm_test_fs)
+
+metrics <- rbind(
+  lda_metrics,
+  metrics_rf,
+  metrics_svm
+)
+
+metrics_unique <- metrics[!duplicated(metrics), ]
+```
+
+#QDA Model 
 ```{r setup, include=FALSE}
 
 set.seed(125) 
